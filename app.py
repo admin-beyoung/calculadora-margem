@@ -1,132 +1,264 @@
 import streamlit as st
+import pandas as pd
+import numpy as np
 
-st.set_page_config(page_title="Calculadora de Margem", layout="wide")
-st.title("📊 Calculadora de Margem")
+# ===========================
+# Config / helpers
+# ===========================
+st.set_page_config(page_title="Calculadora de Margem", layout="wide", page_icon="📊")
 
-access = st.text_input("Access Token", type="password")
-if access == '123by':
-    st.success('SUCESSO!')
-    nome_produto = st.text_input('Nome do produto:')
-    preco = st.number_input('Preço de venda:')
-    desconto = st.number_input('Desconto:')
-    dentro_fora_sp = st.radio("Venda em São Paulo?", ("Sim", "Não"))
-    impostos_gerais = st.number_input('Impostos Gerais:')
-    custo_medio = st.number_input('Custom Médio:')
+def fmt_currency(v: float) -> str:
+    try:
+        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return f"R$ {v:.2f}"
 
-    if st.button('Calcular'):
-        resultado = None
-        if dentro_fora_sp == "Sim":
-            x = 1
-            resultado = (preco - desconto) * x
+def safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+def calcula_resultado(
+    preco_venda: float,
+    desconto_tipo: str,
+    desconto_valor: float,
+    em_sp: bool,
+    impostos_percent: float,
+    impostos_valor_abs: float,
+    custo_medio: float,
+    fator_sp: float = 1.0,
+    fator_outros: float = 0.5,
+):
+    # Desconto
+    if desconto_tipo == "%":
+        desconto_abs = preco_venda * (desconto_valor / 100.0)
+    else:
+        desconto_abs = desconto_valor
+
+    preco_liquido = max(preco_venda - desconto_abs, 0.0)
+
+    # Fator regional (mantém sua regra original)
+    fator_regional = fator_sp if em_sp else fator_outros
+    receita_pos_regiao = preco_liquido * fator_regional
+
+    # Impostos: pode escolher % ou absoluto (se absoluto for fornecido > 0, ele prevalece)
+    impostos_percent_val = max(impostos_percent, 0.0)
+    impostos_calc_percent = receita_pos_regiao * (impostos_percent_val / 100.0)
+    impostos_final = impostos_valor_abs if impostos_valor_abs > 0 else impostos_calc_percent
+
+    # Lucro bruto
+    lucro_bruto = receita_pos_regiao - impostos_final - custo_medio
+    margem_bruta = (lucro_bruto / receita_pos_regiao * 100.0) if receita_pos_regiao > 0 else 0.0
+
+    return {
+        "desconto_abs": desconto_abs,
+        "preco_liquido": preco_liquido,
+        "fator_regional": fator_regional,
+        "receita_pos_regiao": receita_pos_regiao,
+        "impostos_final": impostos_final,
+        "custo_medio": custo_medio,
+        "lucro_bruto": lucro_bruto,
+        "margem_bruta": margem_bruta,
+    }
+
+def tabela_sensibilidade(preco, em_sp, impostos_percent, custo, desconto_base=0, desconto_tipo="%", fator_sp=1.0, fator_outros=0.5):
+    # Gera uma grade de -5pp a +5pp em desconto e +/-10% no custo
+    descontos = np.array([-5, -2, 0, 2, 5])  # em pontos percentuais (pp) se tipo for "%"
+    custos_mult = np.array([0.9, 0.95, 1.0, 1.05, 1.10])
+
+    rows = []
+    for dpp in descontos:
+        if desconto_tipo == "%":
+            desc = max(desconto_base + dpp, 0.0)
+            desconto_label = f"{desc:.0f}%"
+            desc_val = desc
         else:
-            x = 0.5
-            resultado = (preco - desconto) * x
-        resultado_final = resultado - impostos_gerais - custo_medio
+            # Se o desconto for absoluto, variação em R$ com base no preço
+            delta_abs = dpp/100 * preco
+            desc = max(desconto_base + delta_abs, 0.0)
+            desconto_label = fmt_currency(desc)
+            desc_val = desc
 
-        st.text(f'Produto: {nome_produto}')
-        st.text(f'Preço: {preco}')
-        st.text(f'Desconto: {preco - desconto}')
-        st.text(f'Valor Pós Cálculo Venda: {resultado}')
-        st.text(f'Valor de Impostsos: {impostos_gerais}')
-        st.text(f'Custo Médio: {custo_medio}')
-        st.subheader(f'Lucro Bruto: {resultado_final}')
+        for km in custos_mult:
+            custo_var = custo * km
+            r = calcula_resultado(
+                preco_venda=preco,
+                desconto_tipo=desconto_tipo,
+                desconto_valor=desc_val,
+                em_sp=em_sp,
+                impostos_percent=impostos_percent,
+                impostos_valor_abs=0.0,
+                custo_medio=custo_var,
+                fator_sp=fator_sp,
+                fator_outros=fator_outros,
+            )
+            rows.append({
+                "Desconto": desconto_label,
+                "Custo": f"{int((km-1)*100):+d}%",
+                "Margem Bruta (%)": round(r["margem_bruta"], 2),
+                "Lucro Bruto": r["lucro_bruto"],
+                "Preço Líquido": r["preco_liquido"],
+            })
+    df = pd.DataFrame(rows)
+    # Tabela pivoteada por desconto x custo mostrando Margem
+    tabela = df.pivot(index="Desconto", columns="Custo", values="Margem Bruta (%)")
+    return df, tabela
 
-    if st.button('ENVIAR PROPOSTA'):
-        st.subheader('PROPOSTA ENVIADA')
-else:
-    st.warning('SENHA INVÁLIDA!')
+# ===========================
+# Auth simples
+# ===========================
+if "authed" not in st.session_state:
+    st.session_state.authed = False
 
-'''
-Fontes externas: CMV, Preço de venda (site)
-'''
+colA, colB = st.columns([1, 3])
+with colA:
+    st.title("📊 Calculadora de Margem")
+with colB:
+    st.caption("Coloque os inputs, calcule e veja margens e sensibilidade.")
 
+with st.sidebar:
+    st.subheader("🔐 Acesso")
+    if not st.session_state.authed:
+        access = st.text_input("Senha", type="password", help="Dica: a senha padrão atual é a que você usou nos testes 😉")
+        if st.button("Entrar"):
+            if access == "123by":
+                st.session_state.authed = True
+                st.success("Acesso permitido.")
+            else:
+                st.error("Senha inválida.")
+    else:
+        st.success("Acesso já validado.")
 
-# -------------------- Sidebar (opções) --------------------
-# st.sidebar.header("⚙️ Opções")
-# skiprows = st.sidebar.number_input("Linhas a pular no início", min_value=0, value=9, step=1)
-# skipcols_left = st.sidebar.number_input("Colunas a remover (esquerda → direita)", min_value=0, value=0, step=1)
+if not st.session_state.authed:
+    st.info("Informe a senha na barra lateral para acessar a calculadora.")
+    st.stop()
 
-# adicionar_coluna = st.sidebar.checkbox("Adicionar coluna fixa", value=False)
-# if adicionar_coluna:
-#     nome_col = st.sidebar.text_input("Nome da coluna", value="Homem Aranha")
-#     valor_col = st.sidebar.text_input("Valor da coluna", value="1")
+# ===========================
+# Formulário de inputs
+# ===========================
+with st.form("form_calc", clear_on_submit=False):
+    st.subheader("🧮 Parâmetros da Proposta")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        nome_produto = st.text_input("Nome do produto", placeholder="Ex.: Sérum Vitamina C 30ml")
+        preco = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
+        dentro_fora_sp = st.radio("Venda em São Paulo?", options=("Sim", "Não"), horizontal=True)
+    with c2:
+        desconto_tipo = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
+        if desconto_tipo == "%":
+            desconto_valor = st.number_input("Desconto (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.2f")
+        else:
+            desconto_valor = st.number_input("Desconto (R$)", min_value=0.0, step=1.0, format="%.2f")
 
-# # -------------------- Upload --------------------
-# up_files = st.file_uploader("Selecione um ou mais .xlsx", type=["xlsx"], accept_multiple_files=True)
+        impostos_percent = st.number_input("Impostos gerais (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, format="%.2f",
+                                           help="Se você preencher um valor absoluto em R$, ele prevalece sobre o %.")
+    with c3:
+        impostos_abs = st.number_input("Impostos (R$) — opcional", min_value=0.0, step=1.0, format="%.2f")
+        custo_medio = st.number_input("Custo médio (R$)", min_value=0.0, step=1.0, format="%.2f")
+        fator_sp = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1, help="Regra interna. Padrão 1.0")
+        fator_outros = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1, help="Regra interna. Padrão 0.5")
 
-# # -------------------- Utils --------------------
-# @st.cache_data(show_spinner=True)
-# def ler_xlsx(file, skiprows: int, skipcols_left: int,
-#              add_col: bool, nome_coluna: str, valor_coluna: str):
-#     df = pd.read_excel(file, skiprows=skiprows, engine="openpyxl")
+    submitted = st.form_submit_button("Calcular", use_container_width=True)
 
-#     # Remover N primeiras colunas (da esquerda para a direita)
-#     if skipcols_left > 0:
-#         n = min(skipcols_left, df.shape[1])
-#         df = df.iloc[:, n:]
+if submitted:
+    # Validações básicas
+    errors = []
+    if preco <= 0:
+        errors.append("Preço de venda deve ser maior que zero.")
+    if custo_medio < 0:
+        errors.append("Custo médio não pode ser negativo.")
+    if desconto_tipo == "%" and desconto_valor > 100:
+        errors.append("Desconto em % não pode exceder 100%.")
+    if errors:
+        for e in errors:
+            st.error(e)
+        st.stop()
 
-#     # Adicionar coluna fixa (se marcado)
-#     if add_col and nome_coluna:
-#         df.insert(0, nome_coluna, valor_coluna)
+    res = calcula_resultado(
+        preco_venda=preco,
+        desconto_tipo=desconto_tipo,
+        desconto_valor=desconto_valor,
+        em_sp=(dentro_fora_sp == "Sim"),
+        impostos_percent=impostos_percent,
+        impostos_valor_abs=impostos_abs,
+        custo_medio=custo_medio,
+        fator_sp=fator_sp,
+        fator_outros=fator_outros,
+    )
 
-#     # Adiciona origem do arquivo
-#     df.insert(0, "arquivoOrigem", file.name)
-#     return df
+    # ===========================
+    # Saída principal
+    # ===========================
+    st.markdown("---")
+    st.subheader("Resultados")
 
-# def baixar_excel(df: pd.DataFrame, sheet_name: str = "dados") -> bytes:
-#     buffer = io.BytesIO()
-#     with pd.ExcelWriter(buffer, engine="xlsxwriter", datetime_format="yyyy-mm-dd hh:mm:ss") as writer:
-#         df.to_excel(writer, index=False, sheet_name=sheet_name)
-#         ws = writer.sheets[sheet_name]
-#         for idx, col in enumerate(df.columns):
-#             serie = df[col].astype(str)
-#             max_len = max([len(col)] + [len(s) for s in serie.head(1000)])
-#             ws.set_column(idx, idx, min(max_len + 2, 50))
-#     buffer.seek(0)
-#     return buffer.read()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Preço líquido (pós desconto)", fmt_currency(res["preco_liquido"]))
+    m2.metric("Receita pós fator regional", fmt_currency(res["receita_pos_regiao"]), help=f"Fator aplicado: {res['fator_regional']:.2f}")
+    m3.metric("Impostos", fmt_currency(res["impostos_final"]))
+    m4.metric("Custo médio", fmt_currency(res["custo_medio"]))
 
-# # -------------------- Processamento --------------------
-# st.subheader("🛠️ Processar")
-# if st.button("Concatenar"):
-#     if not up_files:
-#         st.warning("Envie pelo menos um arquivo.")
-#     else:
-#         dfs = []
-#         progress = st.progress(0)
-#         for i, f in enumerate(up_files, start=1):
-#             df = ler_xlsx(
-#                 f,
-#                 skiprows,
-#                 skipcols_left,
-#                 adicionar_coluna,
-#                 nome_col if adicionar_coluna else "",
-#                 valor_col if adicionar_coluna else ""
-#             )
-#             dfs.append(df)
-#             progress.progress(i / len(up_files))
+    k1, k2 = st.columns(2)
+    k1.metric("Lucro bruto", fmt_currency(res["lucro_bruto"]))
+    k2.metric("Margem bruta (%)", f"{res['margem_bruta']:.2f}%")
 
-#         if dfs:
-#             df_final = pd.concat(dfs, ignore_index=True)
-#             st.success(f"Concluído! Dimensões finais: {df_final.shape[0]} linhas × {df_final.shape[1]} colunas")
+    with st.expander("Ver detalhamento textual"):
+        st.text(f"Produto: {nome_produto or '-'}")
+        st.text(f"Preço de Venda: {fmt_currency(preco)}")
+        if desconto_tipo == "%":
+            st.text(f"Desconto: {desconto_valor:.2f}%  (={fmt_currency(res['desconto_abs'])})")
+        else:
+            st.text(f"Desconto: {fmt_currency(res['desconto_abs'])}")
+        st.text(f"Preço Líquido: {fmt_currency(res['preco_liquido'])}")
+        st.text(f"Fator Regional aplicado: {res['fator_regional']:.2f}")
+        st.text(f"Receita Pós Fator Regional: {fmt_currency(res['receita_pos_regiao'])}")
+        st.text(f"Impostos Considerados: {fmt_currency(res['impostos_final'])}")
+        st.text(f"Custo Médio: {fmt_currency(res['custo_medio'])}")
+        st.text(f"Lucro Bruto: {fmt_currency(res['lucro_bruto'])}")
+        st.text(f"Margem Bruta: {res['margem_bruta']:.2f}%")
 
-#             st.write("### 🔎 Preview")
-#             st.dataframe(df_final.head(100), use_container_width=True)
+    # ===========================
+    # Sensibilidade
+    # ===========================
+    st.markdown("### 🔎 Análise de sensibilidade")
+    df_raw, tabela = tabela_sensibilidade(
+        preco=preco,
+        em_sp=(dentro_fora_sp == "Sim"),
+        impostos_percent=impostos_percent,
+        custo=custo_medio,
+        desconto_base=desconto_valor if desconto_tipo == "%" else desconto_valor,  # mesmo campo
+        desconto_tipo=desconto_tipo,
+        fator_sp=fator_sp,
+        fator_outros=fator_outros
+    )
 
-#             st.download_button(
-#                 "⬇️ Baixar Excel",
-#                 data=baixar_excel(df_final),
-#                 file_name="concatenado.xlsx",
-#                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-#             )
-#         else:
-#             st.info("Nenhum DataFrame processado.")
+    st.caption("Margem Bruta (%) por variação de desconto (linhas) e custo (colunas).")
+    st.dataframe(tabela.style.format("{:.2f}"))
 
-# # -------------------- Dicas --------------------
-# with st.expander("💡 Suporte"):
-#      st.markdown(
-# """
-# - Carlos Massato Horibe Chinen 👨‍💻  
-# - Guilherme Amato 👨‍💼  
-# - Maura Chagas 👩‍💻
-# """
-#     )
+    # ===========================
+    # Proposta (copiar/colar)
+    # ===========================
+    st.markdown("### ✉️ Enviar proposta")
+    proposta = f"""
+    PROPOSTA COMERCIAL
+    Produto: {nome_produto or '-'}
+    Preço de venda: {fmt_currency(preco)}
+    Desconto: {"{:.2f}%".format(desconto_valor) if desconto_tipo=="%" else fmt_currency(res['desconto_abs'])}
+    Preço líquido: {fmt_currency(res['preco_liquido'])}
+    Região: {"São Paulo" if dentro_fora_sp == "Sim" else "Outros"} (fator {res['fator_regional']:.2f})
+    Receita pós fator: {fmt_currency(res['receita_pos_regiao'])}
+    Impostos: {fmt_currency(res['impostos_final'])}
+    Custo médio: {fmt_currency(res['custo_medio'])}
+    Lucro bruto: {fmt_currency(res['lucro_bruto'])}
+    Margem bruta: {res['margem_bruta']:.2f}%
+    """.strip()
+
+    st.code(proposta, language="markdown")
+
+    if st.button("ENVIAR PROPOSTA", use_container_width=True):
+        st.success("✅ Proposta pronta! Copie o texto acima e envie pelo seu canal preferido.")
+
+# Rodapé
+st.markdown("---")
+st.caption("Fontes externas típicas: CMV, preço de venda (site) • App por Streamlit")
