@@ -133,7 +133,7 @@ with st.sidebar:
     if not st.session_state.authed:
         access = st.text_input("Senha", type="password")
         if st.button("Entrar"):
-            if access == "Beyoung@2025":
+            if access == "123by":
                 st.session_state.authed = True
                 st.success("Acesso permitido.")
             else:
@@ -167,7 +167,7 @@ with st.form("form_calc", clear_on_submit=False):
         impostos_percent = st.number_input("Impostos gerais (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, format="%.2f",
                                            help="Se você preencher um valor absoluto em R$, ele prevalece sobre o %.")
     with c3:
-        impostos_abs = st.number_input("Impostos (R$) — Opcional", min_value=0.0, step=1.0, format="%.2f")
+        impostos_abs = st.number_input("Impostos (R$) — opcional", min_value=0.0, step=1.0, format="%.2f")
         custo_medio = st.number_input("Custo médio (R$)", min_value=0.0, step=1.0, format="%.2f")
         fator_sp = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1, help="Regra interna. Padrão 1.0")
         fator_outros = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1, help="Regra interna. Padrão 0.5")
@@ -204,10 +204,10 @@ if submitted:
     st.subheader("Resultados")
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Preço líquido (Pós Desconto)", fmt_currency(res["preco_liquido"]))
-    m2.metric("Receita Pós Fator Regional", fmt_currency(res["receita_pos_regiao"]), help=f"Fator aplicado: {res['fator_regional']:.2f}")
+    m1.metric("Preço líquido (pós desconto)", fmt_currency(res["preco_liquido"]))
+    m2.metric("Receita pós fator regional", fmt_currency(res["receita_pos_regiao"]), help=f"Fator aplicado: {res['fator_regional']:.2f}")
     m3.metric("Impostos", fmt_currency(res["impostos_final"]))
-    m4.metric("Custo Médio", fmt_currency(res["custo_medio"]))
+    m4.metric("Custo médio", fmt_currency(res["custo_medio"]))
 
     k1, k2 = st.columns(2)
     k1.metric("Lucro bruto", fmt_currency(res["lucro_bruto"]))
@@ -231,7 +231,7 @@ if submitted:
     # =====================================
     # Sensibilidade + Heatmap + Export
     # =====================================
-    st.markdown("### 🔎 Análise de Sensibilidade")
+    st.markdown("### 🔎 Análise de sensibilidade")
 
     df_raw, tabela = tabela_sensibilidade(
         preco=preco,
