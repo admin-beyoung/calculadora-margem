@@ -3,6 +3,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import unicodedata
+from email.message import EmailMessage
+import smtplib, ssl
+from io import BytesIO
 
 # =====================================
 # Config
@@ -40,7 +43,6 @@ def fetch_sheet_products(sheet_id: str, sheet_name: str | None = None) -> pd.Dat
 
     df.columns = [normalize(c) for c in df.columns]
     col_prod = "produto" if "produto" in df.columns else df.columns[0]
-    # custo: tenta "custo medio" → "custo médio" → qualquer "custo" → coluna B
     col_custo = ("custo medio" if "custo medio" in df.columns else
                  ("custo médio" if "custo médio" in df.columns else
                   (next((c for c in df.columns if "custo" in c), df.columns[1] if len(df.columns) > 1 else df.columns[0]))))
@@ -51,8 +53,8 @@ def fetch_sheet_products(sheet_id: str, sheet_name: str | None = None) -> pd.Dat
     out["produto_key"] = out["produto"].map(normalize)
 
     cm = (out["custo_medio_raw"].astype(str)
-          .str.replace(".", "", regex=False)     # remove milhares pt-BR
-          .str.replace(",", ".", regex=False)    # vírgula -> ponto
+          .str.replace(".", "", regex=False)
+          .str.replace(",", ".", regex=False)
           .str.replace(r"[^\d\.\-]", "", regex=True))
     out["custo_medio"] = pd.to_numeric(cm, errors="coerce").fillna(0.0)
 
@@ -110,15 +112,11 @@ def sensibilidade_incremental(
     inc_pct: float = 5.0,    # pontos percentuais por passo
     inc_abs: float = 10.0    # R$ por passo
 ) -> pd.DataFrame:
-    """
-    Gera 5 linhas simulando descontos incrementais em relação ao desconto atual.
-    %  -> soma +5 pp a cada linha
-    R$ -> soma +R$10 a cada linha
-    """
+    """Gera N linhas simulando descontos incrementais em relação ao desconto atual."""
     rows = []
     for i in range(1, steps + 1):
         if desconto_tipo == "%":
-            novo_desc = min(desconto_valor + inc_pct * i, 100.0)  # trava em 100%
+            novo_desc = min(desconto_valor + inc_pct * i, 100.0)  # trava a 100%
             label = f"{novo_desc:.0f}%"
         else:
             novo_desc = max(desconto_valor + inc_abs * i, 0.0)
@@ -145,8 +143,48 @@ def sensibilidade_incremental(
             "Lucro bruto": r["lucro_bruto"],
             "Margem bruta (%)": r["margem_bruta"],
         })
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
+
+def montar_proposta_texto(nome_produto: str, res: dict, desconto_tipo: str, desconto_valor: float,
+                          impostos_tipo: str, impostos_valor: float, regiao_txt: str) -> str:
+    if desconto_tipo == "%":
+        desc_str = f"{desconto_valor:.2f}% (={fmt_currency(res['desconto_abs'])})"
+    else:
+        desc_str = fmt_currency(res["desconto_abs"])
+    imp_str = f"{impostos_valor:.2f}%" if impostos_tipo == "%" else fmt_currency(impostos_valor)
+    return f"""
+PROPOSTA COMERCIAL
+Produto: {nome_produto or '-'}
+Preço líquido: {fmt_currency(res['preco_liquido'])}
+Região: {regiao_txt} (fator {res['fator_regional']:.2f})
+Receita pós fator: {fmt_currency(res['receita_pos_regiao'])}
+Impostos: {imp_str}
+Custo médio: {fmt_currency(res['custo_medio'])}
+Lucro bruto: {fmt_currency(res['lucro_bruto'])}
+Margem bruta: {res['margem_bruta']:.2f}%
+""".strip()
+
+def send_email_with_attachment(to_addresses: list[str], subject: str, body: str,
+                               attachment_name: str | None = None, attachment_bytes: bytes | None = None,
+                               mime_type: str = "text/csv"):
+    """Envia e-mail via SMTP usando credenciais em st.secrets['smtp']."""
+    if "smtp" not in st.secrets:
+        raise RuntimeError("Config SMTP ausente em st.secrets['smtp'].")
+    cfg = st.secrets["smtp"]
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = cfg.get("sender", cfg.get("user"))
+    msg["To"] = ", ".join(to_addresses)
+    msg.set_content(body)
+
+    if attachment_name and attachment_bytes is not None:
+        maintype, subtype = mime_type.split("/", 1)
+        msg.add_attachment(attachment_bytes, maintype=maintype, subtype=subtype, filename=attachment_name)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(cfg["host"], int(cfg.get("port", 465)), context=context) as server:
+        server.login(cfg["user"], cfg["password"])
+        server.send_message(msg)
 
 # =====================================
 # Auth simples
@@ -198,12 +236,20 @@ with tab_exist:
     else:
         with st.form("form_exist", clear_on_submit=False):
             st.markdown("#### Selecione o produto")
+            # Config da sensibilidade
+            sc1, sc2, sc3 = st.columns(3)
+            with sc1:
+                steps_exist = st.number_input("Nº de cenários", min_value=1, max_value=20, value=5, step=1)
+            with sc2:
+                inc_pct_exist = st.number_input("Incremento % por cenário", min_value=0.0, value=5.0, step=0.5, format="%.2f")
+            with sc3:
+                inc_abs_exist = st.number_input("Incremento R$ por cenário", min_value=0.0, value=10.0, step=1.0, format="%.2f")
+
             c1, c2, c3 = st.columns([2, 2, 2])
             with c1:
                 produto_sel = st.selectbox("Produto (da planilha)", options=produtos, index=0)
                 dentro_fora_sp = st.radio("Venda em São Paulo?", options=("Sim", "Não"), horizontal=True)
             with c2:
-                # custo fixo da planilha
                 custo_medio_exist = float(
                     df_planilha.loc[
                         df_planilha["produto_key"] == normalize(prod_key_map.get(produto_sel, produto_sel)),
@@ -236,6 +282,7 @@ with tab_exist:
                                                   format="%.2f", key="imp_valor_exist")
 
             st.markdown("---")
+            email_to_exist = st.text_input("Enviar proposta por e-mail (separe múltiplos com vírgula)", "")
             submit_exist = st.form_submit_button("Calcular (produto existente)", use_container_width=True)
 
         if submit_exist:
@@ -268,7 +315,7 @@ with tab_exist:
             k1.metric("Lucro bruto", fmt_currency(res["lucro_bruto"]))
             k2.metric("Margem bruta", f"{res['margem_bruta']:.2f}%")
 
-            # ===== Nova análise de sensibilidade (incremental no desconto)
+            # ===== Sensibilidade incremental
             st.markdown("### 🔎 Análise de sensibilidade (incremental no desconto)")
             df_inc = sensibilidade_incremental(
                 preco_venda=preco_exist,
@@ -280,7 +327,9 @@ with tab_exist:
                 custo_medio=custo_medio_exist,
                 fator_sp=fator_sp_exist,
                 fator_outros=fator_outros_exist,
-                steps=5, inc_pct=5.0, inc_abs=10.0
+                steps=int(steps_exist),
+                inc_pct=float(inc_pct_exist),
+                inc_abs=float(inc_abs_exist),
             )
             st.dataframe(
                 df_inc.style.format({
@@ -293,18 +342,43 @@ with tab_exist:
                 })
             )
 
-            st.download_button(
-                "⬇️ CSV (sensibilidade incremental)",
-                data=df_inc.to_csv(index=False).encode("utf-8"),
-                file_name="sensibilidade_incremental_existente.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            # Botões de exportação e e-mail
+            csv_inc = df_inc.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ CSV (sensibilidade)", data=csv_inc,
+                               file_name="sensibilidade_incremental_existente.csv", mime="text/csv",
+                               use_container_width=True)
+
+            if email_to_exist.strip():
+                destinatarios = [e.strip() for e in email_to_exist.split(",") if e.strip()]
+                corpo = montar_proposta_texto(produto_sel, res, desc_tipo_exist, desc_valor_exist,
+                                              imp_tipo_exist, imp_valor_exist,
+                                              "São Paulo" if dentro_fora_sp == "Sim" else "Outros")
+                try:
+                    send_email_with_attachment(
+                        destinatarios,
+                        subject=f"Proposta - {produto_sel}",
+                        body=corpo,
+                        attachment_name="sensibilidade.csv",
+                        attachment_bytes=csv_inc,
+                        mime_type="text/csv"
+                    )
+                    st.success("E-mail enviado com sucesso ✅")
+                except Exception as ex:
+                    st.error(f"Falha ao enviar e-mail: {ex}")
 
 # --------- ABA 2: PRODUTO NOVO ---------
 with tab_new:
     with st.form("form_new", clear_on_submit=False):
         st.markdown("#### Dados do produto novo")
+        # Config da sensibilidade
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            steps_new = st.number_input("Nº de cenários", min_value=1, max_value=20, value=5, step=1, key="steps_new")
+        with sc2:
+            inc_pct_new = st.number_input("Incremento % por cenário", min_value=0.0, value=5.0, step=0.5, format="%.2f", key="inc_pct_new")
+        with sc3:
+            inc_abs_new = st.number_input("Incremento R$ por cenário", min_value=0.0, value=10.0, step=1.0, format="%.2f", key="inc_abs_new")
+
         c1, c2, c3 = st.columns([2, 2, 2])
         with c1:
             nome_produto_new = st.text_input("Nome do produto")
@@ -335,6 +409,7 @@ with tab_new:
                                             format="%.2f", key="imp_valor_new")
 
         st.markdown("---")
+        email_to_new = st.text_input("Enviar proposta por e-mail (separe múltiplos com vírgula)", "", key="email_new")
         submit_new = st.form_submit_button("Calcular (produto novo)", use_container_width=True)
 
     if submit_new:
@@ -368,7 +443,7 @@ with tab_new:
         k1.metric("Lucro bruto", fmt_currency(res_new["lucro_bruto"]))
         k2.metric("Margem bruta", f"{res_new['margem_bruta']:.2f}%")
 
-        # ===== Nova análise de sensibilidade (incremental no desconto)
+        # Sensibilidade incremental configurável
         st.markdown("### 🔎 Análise de sensibilidade (incremental no desconto)")
         df_inc_new = sensibilidade_incremental(
             preco_venda=preco_new,
@@ -380,7 +455,9 @@ with tab_new:
             custo_medio=custo_medio_new,
             fator_sp=fator_sp_new,
             fator_outros=fator_outros_new,
-            steps=5, inc_pct=5.0, inc_abs=10.0
+            steps=int(steps_new),
+            inc_pct=float(inc_pct_new),
+            inc_abs=float(inc_abs_new),
         )
         st.dataframe(
             df_inc_new.style.format({
@@ -393,10 +470,25 @@ with tab_new:
             })
         )
 
-        st.download_button(
-            "⬇️ CSV (sensibilidade incremental)",
-            data=df_inc_new.to_csv(index=False).encode("utf-8"),
-            file_name="sensibilidade_incremental_novo.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        csv_inc_new = df_inc_new.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ CSV (sensibilidade)", data=csv_inc_new,
+                           file_name="sensibilidade_incremental_novo.csv", mime="text/csv",
+                           use_container_width=True)
+
+        if email_to_new.strip():
+            destinatarios = [e.strip() for e in email_to_new.split(",") if e.strip()]
+            corpo = montar_proposta_texto(nome_produto_new, res_new, desc_tipo_new, desc_valor_new,
+                                          imp_tipo_new, imp_valor_new,
+                                          "São Paulo" if dentro_fora_sp_new == "Sim" else "Outros")
+            try:
+                send_email_with_attachment(
+                    destinatarios,
+                    subject=f"Proposta - {nome_produto_new or 'Produto novo'}",
+                    body=corpo,
+                    attachment_name="sensibilidade.csv",
+                    attachment_bytes=csv_inc_new,
+                    mime_type="text/csv"
+                )
+                st.success("E-mail enviado com sucesso ✅")
+            except Exception as ex:
+                st.error(f"Falha ao enviar e-mail: {ex}")
