@@ -3,9 +3,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import unicodedata
-from email.message import EmailMessage
-import smtplib, ssl
-from io import BytesIO
 
 # =====================================
 # Config
@@ -53,8 +50,8 @@ def fetch_sheet_products(sheet_id: str, sheet_name: str | None = None) -> pd.Dat
     out["produto_key"] = out["produto"].map(normalize)
 
     cm = (out["custo_medio_raw"].astype(str)
-          .str.replace(".", "", regex=False)
-          .str.replace(",", ".", regex=False)
+          .str.replace(".", "", regex=False)     # milhares pt-BR
+          .str.replace(",", ".", regex=False)    # vírgula -> ponto
           .str.replace(r"[^\d\.\-]", "", regex=True))
     out["custo_medio"] = pd.to_numeric(cm, errors="coerce").fillna(0.0)
 
@@ -84,18 +81,18 @@ def calcula_resultado(
     impostos_final = (receita_pos_regiao * (max(impostos_valor, 0.0)/100.0)
                       if impostos_tipo == "%" else max(impostos_valor, 0.0))
 
+    # lucro e margem
     lucro_bruto = receita_pos_regiao - impostos_final - custo_medio
     margem_bruta = (lucro_bruto/receita_pos_regiao*100.0) if receita_pos_regiao > 0 else 0.0
 
     return {
-        "desconto_abs": desconto_abs,
         "preco_liquido": preco_liquido,
-        "fator_regional": fator_regional,
         "receita_pos_regiao": receita_pos_regiao,
         "impostos_final": impostos_final,
         "custo_medio": custo_medio,
         "lucro_bruto": lucro_bruto,
         "margem_bruta": margem_bruta,
+        "fator_regional": fator_regional,
     }
 
 def sensibilidade_incremental(
@@ -109,14 +106,14 @@ def sensibilidade_incremental(
     fator_sp: float,
     fator_outros: float,
     steps: int = 5,
-    inc_pct: float = 5.0,    # pontos percentuais por passo
-    inc_abs: float = 10.0    # R$ por passo
+    inc_pct: float = 5.0,
+    inc_abs: float = 10.0,
 ) -> pd.DataFrame:
-    """Gera N linhas simulando descontos incrementais em relação ao desconto atual."""
+    """Simula N cenários aumentando o desconto em % (inc_pct) ou em R$ (inc_abs)."""
     rows = []
     for i in range(1, steps + 1):
         if desconto_tipo == "%":
-            novo_desc = min(desconto_valor + inc_pct * i, 100.0)  # trava a 100%
+            novo_desc = min(desconto_valor + inc_pct * i, 100.0)
             label = f"{novo_desc:.0f}%"
         else:
             novo_desc = max(desconto_valor + inc_abs * i, 0.0)
@@ -144,47 +141,6 @@ def sensibilidade_incremental(
             "Margem bruta (%)": r["margem_bruta"],
         })
     return pd.DataFrame(rows)
-
-def montar_proposta_texto(nome_produto: str, res: dict, desconto_tipo: str, desconto_valor: float,
-                          impostos_tipo: str, impostos_valor: float, regiao_txt: str) -> str:
-    if desconto_tipo == "%":
-        desc_str = f"{desconto_valor:.2f}% (={fmt_currency(res['desconto_abs'])})"
-    else:
-        desc_str = fmt_currency(res["desconto_abs"])
-    imp_str = f"{impostos_valor:.2f}%" if impostos_tipo == "%" else fmt_currency(impostos_valor)
-    return f"""
-PROPOSTA COMERCIAL
-Produto: {nome_produto or '-'}
-Preço líquido: {fmt_currency(res['preco_liquido'])}
-Região: {regiao_txt} (fator {res['fator_regional']:.2f})
-Receita pós fator: {fmt_currency(res['receita_pos_regiao'])}
-Impostos: {imp_str}
-Custo médio: {fmt_currency(res['custo_medio'])}
-Lucro bruto: {fmt_currency(res['lucro_bruto'])}
-Margem bruta: {res['margem_bruta']:.2f}%
-""".strip()
-
-def send_email_with_attachment(to_addresses: list[str], subject: str, body: str,
-                               attachment_name: str | None = None, attachment_bytes: bytes | None = None,
-                               mime_type: str = "text/csv"):
-    """Envia e-mail via SMTP usando credenciais em st.secrets['smtp']."""
-    if "smtp" not in st.secrets:
-        raise RuntimeError("Config SMTP ausente em st.secrets['smtp'].")
-    cfg = st.secrets["smtp"]
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = cfg.get("sender", cfg.get("user"))
-    msg["To"] = ", ".join(to_addresses)
-    msg.set_content(body)
-
-    if attachment_name and attachment_bytes is not None:
-        maintype, subtype = mime_type.split("/", 1)
-        msg.add_attachment(attachment_bytes, maintype=maintype, subtype=subtype, filename=attachment_name)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(cfg["host"], int(cfg.get("port", 465)), context=context) as server:
-        server.login(cfg["user"], cfg["password"])
-        server.send_message(msg)
 
 # =====================================
 # Auth simples
@@ -232,11 +188,11 @@ tab_exist, tab_new = st.tabs(["Produto existente", "Produto novo"])
 # --------- ABA 1: PRODUTO EXISTENTE ---------
 with tab_exist:
     if df_planilha is None or len(produtos) == 0:
-        st.error("A planilha não está acessível ou não possui dados. Verifique o compartilhamento e os cabeçalhos (A: produto, B: custo medio).")
+        st.error("A planilha não está acessível ou não possui dados.")
     else:
         with st.form("form_exist", clear_on_submit=False):
             st.markdown("#### Selecione o produto")
-            # Config da sensibilidade
+            # controles de sensibilidade
             sc1, sc2, sc3 = st.columns(3)
             with sc1:
                 steps_exist = st.number_input("Nº de cenários", min_value=1, max_value=20, value=5, step=1)
@@ -247,52 +203,41 @@ with tab_exist:
 
             c1, c2, c3 = st.columns([2, 2, 2])
             with c1:
-                produto_sel = st.selectbox("Produto (da planilha)", options=produtos, index=0)
+                produto_sel = st.selectbox("Produto (da planilha)", options=produtos)
                 dentro_fora_sp = st.radio("Venda em São Paulo?", options=("Sim", "Não"), horizontal=True)
             with c2:
+                # custo médio amarrado à planilha
                 custo_medio_exist = float(
                     df_planilha.loc[
                         df_planilha["produto_key"] == normalize(prod_key_map.get(produto_sel, produto_sel)),
                         "custo_medio"
                     ].iloc[0]
                 )
-                preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f", key="preco_exist")
-                st.number_input("Custo médio (R$) — planilha", value=custo_medio_exist, format="%.2f",
-                                disabled=True, help="Vinculado à coluna B: 'custo medio'.")
+                preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
+                st.number_input("Custo médio (R$) — planilha", value=custo_medio_exist, format="%.2f", disabled=True)
             with c3:
-                fator_sp_exist = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1, key="fsp_exist")
-                fator_outros_exist = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1, key="fout_exist")
+                fator_sp_exist = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1)
+                fator_outros_exist = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1)
 
             st.markdown("---")
             st.markdown("#### Regras comerciais")
             d1, d2 = st.columns(2)
             with d1:
-                st.markdown("**Desconto**")
-                desc_tipo_exist = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True, key="desc_tipo_exist")
+                desc_tipo_exist = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
                 desc_valor_exist = st.number_input("Desconto (%)" if desc_tipo_exist == "%" else "Desconto (R$)",
                                                    min_value=0.0, max_value=100.0 if desc_tipo_exist == "%" else None,
-                                                   step=0.5 if desc_tipo_exist == "%" else 1.0,
-                                                   format="%.2f", key="desc_valor_exist")
+                                                   step=0.5 if desc_tipo_exist == "%" else 1.0, format="%.2f")
             with d2:
-                st.markdown("**Impostos**")
-                imp_tipo_exist = st.radio("Tipo de impostos", options=["%", "R$"], horizontal=True, key="imp_tipo_exist")
+                imp_tipo_exist = st.radio("Tipo de impostos", options=["%", "R$"], horizontal=True)
                 imp_valor_exist = st.number_input("Impostos (%)" if imp_tipo_exist == "%" else "Impostos (R$)",
                                                   min_value=0.0, max_value=100.0 if imp_tipo_exist == "%" else None,
-                                                  step=0.5 if imp_tipo_exist == "%" else 1.0,
-                                                  format="%.2f", key="imp_valor_exist")
+                                                  step=0.5 if imp_tipo_exist == "%" else 1.0, format="%.2f")
 
             st.markdown("---")
-            email_to_exist = st.text_input("Enviar proposta por e-mail (separe múltiplos com vírgula)", "")
-            submit_exist = st.form_submit_button("Calcular (produto existente)", use_container_width=True)
+            submit_exist = st.form_submit_button("Calcular", use_container_width=True)
 
         if submit_exist:
-            errs = []
-            if preco_exist <= 0: errs.append("Preço de venda deve ser maior que zero.")
-            if desc_tipo_exist == "%" and desc_valor_exist > 100: errs.append("Desconto em % não pode exceder 100%.")
-            if imp_tipo_exist == "%" and imp_valor_exist > 100: errs.append("Impostos em % não pode exceder 100%.")
-            if errs:
-                for e in errs: st.error(e); st.stop()
-
+            # cálculo base
             res = calcula_resultado(
                 preco_venda=preco_exist,
                 desconto_tipo=desc_tipo_exist,
@@ -308,14 +253,14 @@ with tab_exist:
             st.subheader("Resultados")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Preço líquido", fmt_currency(res["preco_liquido"]))
-            m2.metric("Receita pós fator", fmt_currency(res["receita_pos_regiao"]), help=f"Fator: {res['fator_regional']:.2f}")
+            m2.metric("Receita pós fator", fmt_currency(res["receita_pos_regiao"]))
             m3.metric("Impostos", fmt_currency(res["impostos_final"]))
-            m4.metric("Custo médio (planilha)", fmt_currency(res["custo_medio"]))
+            m4.metric("Custo médio", fmt_currency(res["custo_medio"]))
             k1, k2 = st.columns(2)
             k1.metric("Lucro bruto", fmt_currency(res["lucro_bruto"]))
             k2.metric("Margem bruta", f"{res['margem_bruta']:.2f}%")
 
-            # ===== Sensibilidade incremental
+            # Sensibilidade incremental
             st.markdown("### 🔎 Análise de sensibilidade (incremental no desconto)")
             df_inc = sensibilidade_incremental(
                 preco_venda=preco_exist,
@@ -339,88 +284,53 @@ with tab_exist:
                     "Custo médio": fmt_currency,
                     "Lucro bruto": fmt_currency,
                     "Margem bruta (%)": "{:.2f}"
-                })
+                }),
+                use_container_width=True
             )
-
-            # Botões de exportação e e-mail
-            csv_inc = df_inc.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ CSV (sensibilidade)", data=csv_inc,
-                               file_name="sensibilidade_incremental_existente.csv", mime="text/csv",
-                               use_container_width=True)
-
-            if email_to_exist.strip():
-                destinatarios = [e.strip() for e in email_to_exist.split(",") if e.strip()]
-                corpo = montar_proposta_texto(produto_sel, res, desc_tipo_exist, desc_valor_exist,
-                                              imp_tipo_exist, imp_valor_exist,
-                                              "São Paulo" if dentro_fora_sp == "Sim" else "Outros")
-                try:
-                    send_email_with_attachment(
-                        destinatarios,
-                        subject=f"Proposta - {produto_sel}",
-                        body=corpo,
-                        attachment_name="sensibilidade.csv",
-                        attachment_bytes=csv_inc,
-                        mime_type="text/csv"
-                    )
-                    st.success("E-mail enviado com sucesso ✅")
-                except Exception as ex:
-                    st.error(f"Falha ao enviar e-mail: {ex}")
+            st.download_button("⬇️ CSV (sensibilidade)", data=df_inc.to_csv(index=False).encode("utf-8"),
+                               file_name="sensibilidade_existente.csv", mime="text/csv", use_container_width=True)
 
 # --------- ABA 2: PRODUTO NOVO ---------
 with tab_new:
     with st.form("form_new", clear_on_submit=False):
         st.markdown("#### Dados do produto novo")
-        # Config da sensibilidade
+        # controles de sensibilidade
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
-            steps_new = st.number_input("Nº de cenários", min_value=1, max_value=20, value=5, step=1, key="steps_new")
+            steps_new = st.number_input("Nº de cenários", min_value=1, max_value=20, value=5, step=1)
         with sc2:
-            inc_pct_new = st.number_input("Incremento % por cenário", min_value=0.0, value=5.0, step=0.5, format="%.2f", key="inc_pct_new")
+            inc_pct_new = st.number_input("Incremento % por cenário", min_value=0.0, value=5.0, step=0.5, format="%.2f")
         with sc3:
-            inc_abs_new = st.number_input("Incremento R$ por cenário", min_value=0.0, value=10.0, step=1.0, format="%.2f", key="inc_abs_new")
+            inc_abs_new = st.number_input("Incremento R$ por cenário", min_value=0.0, value=10.0, step=1.0, format="%.2f")
 
         c1, c2, c3 = st.columns([2, 2, 2])
         with c1:
             nome_produto_new = st.text_input("Nome do produto")
-            dentro_fora_sp_new = st.radio("Venda em São Paulo?", options=("Sim", "Não"), horizontal=True, key="sp_new")
+            dentro_fora_sp_new = st.radio("Venda em São Paulo?", options=("Sim", "Não"), horizontal=True)
         with c2:
-            preco_new = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f", key="preco_new")
-            custo_medio_new = st.number_input("Custo médio (R$)", min_value=0.0, step=1.0, format="%.2f", key="custo_new")
+            preco_new = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
+            custo_medio_new = st.number_input("Custo médio (R$)", min_value=0.0, step=1.0, format="%.2f")
         with c3:
-            fator_sp_new = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1, key="fsp_new")
-            fator_outros_new = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1, key="fout_new")
+            fator_sp_new = st.number_input("Fator SP", min_value=0.0, value=1.0, step=0.1)
+            fator_outros_new = st.number_input("Fator fora de SP", min_value=0.0, value=0.5, step=0.1)
 
         st.markdown("---")
-        st.markdown("#### Regras comerciais")
         d1, d2 = st.columns(2)
         with d1:
-            st.markdown("**Desconto**")
-            desc_tipo_new = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True, key="desc_tipo_new")
+            desc_tipo_new = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
             desc_valor_new = st.number_input("Desconto (%)" if desc_tipo_new == "%" else "Desconto (R$)",
                                              min_value=0.0, max_value=100.0 if desc_tipo_new == "%" else None,
-                                             step=0.5 if desc_tipo_new == "%" else 1.0,
-                                             format="%.2f", key="desc_valor_new")
+                                             step=0.5 if desc_tipo_new == "%" else 1.0, format="%.2f")
         with d2:
-            st.markdown("**Impostos**")
-            imp_tipo_new = st.radio("Tipo de impostos", options=["%", "R$"], horizontal=True, key="imp_tipo_new")
+            imp_tipo_new = st.radio("Tipo de impostos", options=["%", "R$"], horizontal=True)
             imp_valor_new = st.number_input("Impostos (%)" if imp_tipo_new == "%" else "Impostos (R$)",
                                             min_value=0.0, max_value=100.0 if imp_tipo_new == "%" else None,
-                                            step=0.5 if imp_tipo_new == "%" else 1.0,
-                                            format="%.2f", key="imp_valor_new")
+                                            step=0.5 if imp_tipo_new == "%" else 1.0, format="%.2f")
 
         st.markdown("---")
-        email_to_new = st.text_input("Enviar proposta por e-mail (separe múltiplos com vírgula)", "", key="email_new")
-        submit_new = st.form_submit_button("Calcular (produto novo)", use_container_width=True)
+        submit_new = st.form_submit_button("Calcular", use_container_width=True)
 
     if submit_new:
-        errs = []
-        if preco_new <= 0: errs.append("Preço de venda deve ser maior que zero.")
-        if custo_medio_new < 0: errs.append("Custo médio não pode ser negativo.")
-        if desc_tipo_new == "%" and desc_valor_new > 100: errs.append("Desconto em % não pode exceder 100%.")
-        if imp_tipo_new == "%" and imp_valor_new > 100: errs.append("Impostos em % não pode exceder 100%.")
-        if errs:
-            for e in errs: st.error(e); st.stop()
-
         res_new = calcula_resultado(
             preco_venda=preco_new,
             desconto_tipo=desc_tipo_new,
@@ -436,14 +346,13 @@ with tab_new:
         st.subheader("Resultados (produto novo)")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Preço líquido", fmt_currency(res_new["preco_liquido"]))
-        m2.metric("Receita pós fator", fmt_currency(res_new["receita_pos_regiao"]), help=f"Fator: {res_new['fator_regional']:.2f}")
+        m2.metric("Receita pós fator", fmt_currency(res_new["receita_pos_regiao"]))
         m3.metric("Impostos", fmt_currency(res_new["impostos_final"]))
         m4.metric("Custo médio", fmt_currency(res_new["custo_medio"]))
         k1, k2 = st.columns(2)
         k1.metric("Lucro bruto", fmt_currency(res_new["lucro_bruto"]))
         k2.metric("Margem bruta", f"{res_new['margem_bruta']:.2f}%")
 
-        # Sensibilidade incremental configurável
         st.markdown("### 🔎 Análise de sensibilidade (incremental no desconto)")
         df_inc_new = sensibilidade_incremental(
             preco_venda=preco_new,
@@ -467,28 +376,8 @@ with tab_new:
                 "Custo médio": fmt_currency,
                 "Lucro bruto": fmt_currency,
                 "Margem bruta (%)": "{:.2f}"
-            })
+            }),
+            use_container_width=True
         )
-
-        csv_inc_new = df_inc_new.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ CSV (sensibilidade)", data=csv_inc_new,
-                           file_name="sensibilidade_incremental_novo.csv", mime="text/csv",
-                           use_container_width=True)
-
-        if email_to_new.strip():
-            destinatarios = [e.strip() for e in email_to_new.split(",") if e.strip()]
-            corpo = montar_proposta_texto(nome_produto_new, res_new, desc_tipo_new, desc_valor_new,
-                                          imp_tipo_new, imp_valor_new,
-                                          "São Paulo" if dentro_fora_sp_new == "Sim" else "Outros")
-            try:
-                send_email_with_attachment(
-                    destinatarios,
-                    subject=f"Proposta - {nome_produto_new or 'Produto novo'}",
-                    body=corpo,
-                    attachment_name="sensibilidade.csv",
-                    attachment_bytes=csv_inc_new,
-                    mime_type="text/csv"
-                )
-                st.success("E-mail enviado com sucesso ✅")
-            except Exception as ex:
-                st.error(f"Falha ao enviar e-mail: {ex}")
+        st.download_button("⬇️ CSV (sensibilidade)", data=df_inc_new.to_csv(index=False).encode("utf-8"),
+                           file_name="sensibilidade_novo.csv", mime="text/csv", use_container_width=True)
