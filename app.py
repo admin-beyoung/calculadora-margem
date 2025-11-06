@@ -4,7 +4,7 @@ import pandas as pd
 import unicodedata
 
 # =============== Config ===============
-st.set_page_config(page_title="Calculadora de Margem (Simples)", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Calculadora de Margem", layout="wide", page_icon="📊")
 
 SHEET_ID = "1C_rUy26WhRnx4XDoYHhV-PNCNHFOPyU5ZHnl2pQ_LXU"
 SHEET_NAME = None  # usa a primeira aba da planilha pública
@@ -68,7 +68,7 @@ def big_metric(label: str, value_str: str):
     )
 
 # =============== App ===============
-st.title("📊 Calculadora de Margem — Versão Simples")
+st.title("📊 Calculadora de Margem")
 
 tab_exist, tab_new = st.tabs(["Produto existente", "Produto novo"])
 
@@ -168,15 +168,19 @@ with tab_new:
     margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
     margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
-    receita_total = receita_sp + receita_es
+    # ===== Totais (agora com Receita Líquida e Lucro Bruto) =====
+    faturamento = preco_novo * (un_sp + un_es)  # preço cheio x unidades totais
+    descontos_totais = max(preco_novo - preco_liq, 0.0) * (un_sp + un_es)
+    receita_total = receita_sp + receita_es                    # receita após descontos
     imp_total = imp_sp_val + imp_es_val
-    custo_total = custo_sp_total + custo_es_total
-    lucro_total = receita_total - imp_total - custo_total
-    margem_total = (lucro_total / receita_total * 100.0) if receita_total > 0 else 0.0
+    receita_liquida = faturamento - descontos_totais - imp_total
+    custo_total = custo_sp_total + custo_es_total              # ( - ) CMV
+    lucro_bruto_total = receita_liquida - custo_total
+    margem_total = (lucro_bruto_total / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
 
     # ======= Resultados por Região (TABELA) =======
     st.markdown("---")
-    st.subheader("📊 Resultados por Região (Tabular)")
+    st.subheader("📊 Resultados por Região")
 
     df_reg = pd.DataFrame([
         {
@@ -214,21 +218,25 @@ with tab_new:
             "Lucro": fmt_currency,
             "Margem": lambda v: f"{v:.2f}%"
         }),
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )
 
     # ======= Totais =======
     st.markdown("---")
     st.subheader("🧮 Totais")
-    t1, t2, t3, t4, t5 = st.columns(5)
+    t1, t2, t3, t4, t5, t6, t7 = st.columns(7)
     with t1:
-        st.metric("Unidades", fmt_int(qtd_vendas))
+        big_metric("Unidades", fmt_int(un_sp + un_es))
     with t2:
-        big_metric("Receita total", fmt_currency(receita_total))
+        big_metric("Faturamento", fmt_currency(faturamento))
     with t3:
         big_metric("Impostos totais", fmt_currency(imp_total))
     with t4:
-        big_metric("Custos totais", fmt_currency(custo_total))
+        big_metric("Receita Líquida", fmt_currency(receita_liquida))
     with t5:
-        st.metric("Margem total", f"{margem_total:.2f}%")
+        big_metric("( - ) CMV", fmt_currency(custo_total))
+    with t6:
+        big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
+    with t7:
+        big_metric("Margem Bruta", f"{margem_total:.2f}%")
