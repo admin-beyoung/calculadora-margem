@@ -1,25 +1,16 @@
 # app.py
-import unicodedata
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import unicodedata
 
-# BigQuery
-from google.cloud import bigquery
-from google.oauth2 import service_account
-
-# ===================== Config =====================
+# ================= Config =================
 st.set_page_config(page_title="Calculadora de Margem", layout="wide", page_icon="📊")
 
-PROJECT_ID = "bi-beyoung"
-DATASET    = "silver_layer"
-TABLE      = "google_sheets_average_cost_by_product_branch"  # colunas: year_month, branch, sku, average_cost
+# Planilha pública
+SHEET_ID = "19-evG-LmVdYxHXNgaeAzAOk3DNzX5G8znqcIdQwgni0"
+SHEET_NAME = None  # None => primeira aba; use "HARDINPUT" p/ forçar
 
-SCOPES = [
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/bigquery",
-]
-
-# ===================== Utils =====================
+# ================= Utils =================
 def fmt_currency(v: float) -> str:
     try:
         return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -39,34 +30,28 @@ def normalize(s: str) -> str:
     s = " ".join(s.split())
     return s
 
-# ===================== Auth via st.secrets =====================
-def get_bq_client_from_secrets(project_id: str) -> bigquery.Client:
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError(
-            "gcp_service_account não encontrado em st.secrets. "
-            "Crie .streamlit/secrets.toml com a seção [gcp_service_account]."
-        )
-    sa_info = dict(st.secrets["gcp_service_account"])
-    creds = service_account.Credentials.from_service_account_info(sa_info, scopes=SCOPES)
-    return bigquery.Client(project=project_id, credentials=creds)
-
 @st.cache_data(ttl=300)
-def fetch_cost_table(client: bigquery.Client, project_id: str, dataset: str, table: str) -> pd.DataFrame:
-    query = f"""
-        SELECT
-          CAST(year_month AS STRING) AS year_month,
-          CAST(branch     AS STRING) AS branch,
-          CAST(sku        AS STRING) AS sku,
-          SAFE_CAST(average_cost AS FLOAT64) AS average_cost
-        FROM `{project_id}.{dataset}.{table}`
-        WHERE sku IS NOT NULL AND branch IS NOT NULL AND year_month IS NOT NULL
-    """
-    df = client.query(query).to_dataframe()
-    df["year_month"] = df["year_month"].str.slice(0, 7)  # força YYYY-MM
-    df = df.dropna(subset=["year_month", "branch", "sku"]).drop_duplicates().reset_index(drop=True)
+def fetch_sheet_public(sheet_id: str, sheet_name: str | None = None) -> pd.DataFrame:
+    url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        if sheet_name else
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
+    )
+    df = pd.read_csv(url, dtype=str)
+    df.columns = [normalize(c) for c in df.columns]
     return df
 
-# ---- Card visual ----
+def parse_money_ptbr(x: str) -> float:
+    if x is None:
+        return 0.0
+    s = str(x)
+    s = s.replace(".", "").replace(",", ".")
+    s = "".join(ch for ch in s if (ch.isdigit() or ch in ".-"))
+    try:
+        return float(s)
+    except:
+        return 0.0
+
 def big_metric(label: str, value_str: str):
     st.markdown(
         f"""
@@ -78,133 +63,229 @@ def big_metric(label: str, value_str: str):
         unsafe_allow_html=True,
     )
 
-# ===================== App =====================
+# ================= App =================
 st.title("📊 Calculadora de Margem")
 
 tab_exist, tab_new = st.tabs(["Produto existente", "Produto novo"])
 
-# --------- ABA 1: PRODUTO EXISTENTE (BigQuery via st.secrets) ---------
+# --------- ABA 1: PRODUTO EXISTENTE ---------
 with tab_exist:
     try:
-        bq = get_bq_client_from_secrets(PROJECT_ID)
-        df_cost = fetch_cost_table(bq, PROJECT_ID, DATASET, TABLE)
+        df = fetch_sheet_public(SHEET_ID, SHEET_NAME)
     except Exception as e:
-        df_cost = None
-        st.error(f"Erro ao autenticar/carregar do BigQuery: {e}")
+        df = None
+        st.error(f"Erro ao carregar planilha pública: {e}")
 
-    if df_cost is None or df_cost.empty:
-        st.warning("Tabela do BigQuery vazia ou inacessível. Verifique projeto/dataset/tabela e permissões.")
+    if df is None or df.empty:
+        st.warning("Planilha vazia ou inacessível.")
     else:
-        # Seletores em cascata: Mês -> Filial -> SKU
-        meses = sorted(df_cost["year_month"].unique())
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            sel_month = st.selectbox("Mês (year_month)", options=meses, index=max(len(meses)-1, 0), key="bq_mes")
-        df_m = df_cost[df_cost["year_month"] == sel_month]
+        st.caption("Fonte: Google Sheets")
 
-        with c2:
-            branches = sorted(df_m["branch"].unique())
-            sel_branch = st.selectbox("Filial (branch)", options=branches, key="bq_branch")
-        df_mb = df_m[df_m["branch"] == sel_branch]
+        # Detecta colunas
+        candidates_prod  = ["produto", "produto_nome", "nome", "sku", "codigo", "código", "item"]
+        candidates_cost  = ["custo", "custo medio", "custo médio", "custo unitario",
+                            "custo unitário", "average_cost", "preco_custo", "preço de custo"]
+        candidates_branch = ["branch", "filial"]
 
-        with c3:
-            skus = sorted(df_mb["sku"].unique())
-            sel_sku = st.selectbox("SKU", options=skus, key="bq_sku")
+        col_prod   = next((c for c in candidates_prod if c in df.columns), None)
+        col_cost   = next((c for c in candidates_cost if c in df.columns), None)
+        col_branch = next((c for c in candidates_branch if c in df.columns), None)
 
-        # Custo médio da combinação selecionada
-        row = df_mb[df_mb["sku"] == sel_sku].head(1)
-        custo_medio = float(row["average_cost"].iloc[0]) if not row.empty else 0.0
+        if not col_prod or not col_cost:
+            st.warning(f"Não encontrei colunas de produto/custo. Colunas: {list(df.columns)}")
+        else:
+            # Select de produto (com busca ao digitar)
+            produtos = (
+                df[col_prod].astype(str).str.strip()
+                .replace({"": None}).dropna().drop_duplicates().tolist()
+            )
+            produto_sel = st.selectbox("Produto (digite para buscar)", options=produtos, key="produto_existente")
 
-        # Input de preço e cálculo
-        preco = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f", key="preco_existente")
-        st.text_input("Custo médio (R$) — BigQuery", value=f"{custo_medio:.2f}", disabled=True, key="custo_existente")
+            # Subconjunto do produto
+            df_prod = df[df[col_prod] == produto_sel].copy()
 
-        lucro = max(preco - custo_medio, 0.0)
-        margem = (lucro / preco * 100.0) if preco > 0 else 0.0
+            # Captura custos por branch: SP (VP-01) e ES (VP-06)
+            custo_sp_val = None
+            custo_es_val = None
+            if col_branch and not df_prod.empty:
+                row_sp = df_prod[df_prod[col_branch].astype(str) == "VP-01"]
+                if not row_sp.empty:
+                    custo_sp_val = parse_money_ptbr(str(row_sp[col_cost].iloc[0]))
+                row_es = df_prod[df_prod[col_branch].astype(str) == "VP-06"]
+                if not row_es.empty:
+                    custo_es_val = parse_money_ptbr(str(row_es[col_cost].iloc[0]))
 
-        m1, m2 = st.columns(2)
-        with m1: big_metric("Lucro bruto", fmt_currency(lucro))
-        with m2: big_metric("Margem bruta", f"{margem:.2f}%")
+            # Campos imutáveis com os custos encontrados
+            csp, ces = st.columns(2)
+            with csp:
+                st.text_input("Custo São Paulo (VP-01)",
+                              value=("—" if custo_sp_val is None else f"{custo_sp_val:.2f}"),
+                              disabled=True)
+            with ces:
+                st.text_input("Custo Espírito Santo (VP-06)",
+                              value=("—" if custo_es_val is None else f"{custo_es_val:.2f}"),
+                              disabled=True)
 
-# --------- ABA 2: PRODUTO NOVO (como já estava) ---------
+            # ===== Entradas no mesmo molde da aba 2 (sem desconto) =====
+            preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0,
+                                          format="%.2f", key="preco_existente_val")
+
+            qtd_vendas_exist = st.number_input("Quantidade de Vendas (un.)", min_value=0, step=1, value=0,
+                                               key="qtd_exist")
+            pct_sp_exist = st.number_input("% SP", min_value=0.0, max_value=100.0, step=1.0, value=50.0,
+                                           format="%.2f", key="pct_sp_exist")
+            pct_es_exist = st.number_input("% ES", min_value=0.0, max_value=100.0, step=1.0, value=50.0,
+                                           format="%.2f", key="pct_es_exist")
+
+            col_imp_exist = st.columns(2)
+            with col_imp_exist[0]:
+                imposto_sp_pct_exist = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0,
+                                                       step=0.5, value=0.0, format="%.2f", key="imp_sp_exist")
+            with col_imp_exist[1]:
+                imposto_es_pct_exist = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0,
+                                                       step=0.5, value=0.0, format="%.2f", key="imp_es_exist")
+
+            # Split normalizado
+            total_pct_exist = pct_sp_exist + pct_es_exist
+            if total_pct_exist == 0:
+                w_sp, w_es = 0.5, 0.5
+                st.warning("Percentuais somam 0%. Usando 50%/50%.")
+            else:
+                w_sp = pct_sp_exist / total_pct_exist
+                w_es = pct_es_exist / total_pct_exist
+
+            un_sp = int(round(qtd_vendas_exist * w_sp))
+            un_es = int(qtd_vendas_exist - un_sp)
+
+            # Preço líquido SEM desconto (aba 1 não tem desconto)
+            preco_liq = preco_exist
+
+            # Cálculos regionais
+            receita_sp = preco_liq * un_sp
+            receita_es = preco_liq * un_es
+
+            imp_sp_val = receita_sp * (imposto_sp_pct_exist / 100.0)
+            imp_es_val = receita_es * (imposto_es_pct_exist / 100.0)
+
+            # Custos por região (se ausente, considera 0)
+            custo_sp_unit = custo_sp_val or 0.0
+            custo_es_unit = custo_es_val or 0.0
+            custo_sp_total = custo_sp_unit * un_sp
+            custo_es_total = custo_es_unit * un_es
+
+            lucro_sp = receita_sp - imp_sp_val - custo_sp_total
+            lucro_es = receita_es - imp_es_val - custo_es_total
+            margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
+            margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
+
+            # Totais
+            faturamento = preco_exist * (un_sp + un_es)
+            imp_total = imp_sp_val + imp_es_val
+            receita_liquida = faturamento - imp_total  # sem desconto
+            custo_total = custo_sp_total + custo_es_total
+            lucro_bruto_total = receita_liquida - custo_total
+            margem_total = (lucro_bruto_total / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
+
+            # ======= Tabela por região =======
+            st.markdown("---")
+            st.subheader("📊 Resultados por Região")
+
+            df_reg_exist = pd.DataFrame([
+                {"Região": "SP", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq,
+                 "Quantidade de unidades vendidas": un_sp, "Receita": receita_sp, "Impostos": imp_sp_val,
+                 "Custos": custo_sp_total, "Lucro": lucro_sp, "Margem": margem_sp},
+                {"Região": "ES", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq,
+                 "Quantidade de unidades vendidas": un_es, "Receita": receita_es, "Impostos": imp_es_val,
+                 "Custos": custo_es_total, "Lucro": lucro_es, "Margem": margem_es},
+            ])
+
+            st.dataframe(
+                df_reg_exist.style.format({
+                    "Valor de venda": fmt_currency,
+                    "Valor após os descontos": fmt_currency,
+                    "Quantidade de unidades vendidas": lambda v: fmt_int(v),
+                    "Receita": fmt_currency, "Impostos": fmt_currency,
+                    "Custos": fmt_currency, "Lucro": fmt_currency,
+                    "Margem": lambda v: f"{v:.2f}%"
+                }),
+                width="stretch", hide_index=True
+            )
+
+            # ======= Totais =======
+            st.markdown("---")
+            st.subheader("🧮 Totais")
+            t1, t2, t3, t4, t5, t6, t7 = st.columns(7)
+            with t1: big_metric("Unidades", fmt_int(un_sp + un_es))
+            with t2: big_metric("Faturamento", fmt_currency(faturamento))
+            with t3: big_metric("Impostos totais", fmt_currency(imp_total))
+            with t4: big_metric("Receita Líquida", fmt_currency(receita_liquida))
+            with t5: big_metric("( - ) CMV", fmt_currency(custo_total))
+            with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
+            with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
+
+# --------- ABA 2: PRODUTO NOVO (como estava) ---------
 with tab_new:
-    st.caption("Preço, desconto (R$/%), impostos por região, custos, quantidade e split SP/ES.")
+    st.caption("Simulador para novos produtos.")
 
-    # Entradas básicas
-    preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f", key="preco_novo")
+    preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
 
     col_custos = st.columns(2)
     with col_custos[0]:
-        custo_sp = st.number_input("Custo SP (R$)", min_value=0.0, step=1.0, format="%.2f", key="custo_sp")
+        custo_sp = st.number_input("Custo SP (R$)", min_value=0.0, step=1.0, format="%.2f")
     with col_custos[1]:
-        custo_es = st.number_input("Custo ES (R$)", min_value=0.0, step=1.0, format="%.2f", key="custo_es")
+        custo_es = st.number_input("Custo ES (R$)", min_value=0.0, step=1.0, format="%.2f")
 
-    # Desconto (tipo + valor)
     col_desc = st.columns(2)
     with col_desc[0]:
-        desc_tipo = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True, key="desc_tipo")
+        desc_tipo = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
     with col_desc[1]:
-        desc_valor = st.number_input(f"Desconto ({desc_tipo})", min_value=0.0, step=0.5, format="%.2f", key="desc_valor")
+        desc_valor = st.number_input(f"Desconto ({desc_tipo})", min_value=0.0, step=0.5, format="%.2f")
 
-    # Quantidade e split
-    qtd_vendas = st.number_input("Quantidade de Vendas (un.)", min_value=0, step=1, value=0, key="qtd_vendas")
-    pct_sp = st.number_input("% SP", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f", key="pct_sp")
-    pct_es = st.number_input("% ES", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f", key="pct_es")
+    qtd_vendas = st.number_input("Quantidade de Vendas (un.)", min_value=0, step=1, value=0)
+    pct_sp = st.number_input("% SP", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f")
+    pct_es = st.number_input("% ES", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f")
 
-    # Impostos
     col_imp = st.columns(2)
     with col_imp[0]:
-        imposto_sp_pct = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, format="%.2f", key="imp_sp")
+        imposto_sp_pct = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f")
     with col_imp[1]:
-        imposto_es_pct = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, format="%.2f", key="imp_es")
+        imposto_es_pct = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f")
 
-    # Split normalizado
     total_pct = pct_sp + pct_es
-    if total_pct == 0:
-        st.warning("Percentuais somam 0%. Usando 50% / 50%.")
-        w_sp, w_es = 0.5, 0.5
-    else:
-        w_sp = pct_sp / total_pct
-        w_es = pct_es / total_pct
-
-    un_sp = int(round(qtd_vendas * w_sp))
+    w_sp = pct_sp / total_pct if total_pct else 0.5
+    w_es = pct_es / total_pct if total_pct else 0.5
+    un_sp = int(qtd_vendas * w_sp)
     un_es = int(qtd_vendas - un_sp)
 
-    # Preço líquido após desconto
     if desc_tipo == "%":
         preco_liq = preco_novo * (1 - desc_valor / 100.0)
     else:
         preco_liq = max(preco_novo - desc_valor, 0.0)
 
-    # Cálculos regionais
     receita_sp = preco_liq * un_sp
     receita_es = preco_liq * un_es
-
     imp_sp_val = receita_sp * (imposto_sp_pct / 100.0)
     imp_es_val = receita_es * (imposto_es_pct / 100.0)
-
     custo_sp_total = custo_sp * un_sp
     custo_es_total = custo_es * un_es
-
     lucro_sp = receita_sp - imp_sp_val - custo_sp_total
     lucro_es = receita_es - imp_es_val - custo_es_total
-
     margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
     margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
-    # Totais (com Receita Líquida e Lucro Bruto)
     faturamento = preco_novo * (un_sp + un_es)
-    descontos_totais = max(preco_novo - preco_liq, 0.0) * (un_sp + un_es)
+    descontos_totais = (preco_novo - preco_liq) * (un_sp + un_es)
     receita_total = receita_sp + receita_es
     imp_total = imp_sp_val + imp_es_val
     receita_liquida = faturamento - descontos_totais - imp_total
     custo_total = custo_sp_total + custo_es_total
-    lucro_bruto_total = receita_liquida - custo_total
-    margem_total = (lucro_bruto_total / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
+    lucro_bruto = receita_liquida - custo_total
+    margem_total = (lucro_bruto / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
 
-    # Tabela por região
+    # ======= Resultados por Região (TABELA) =======
     st.markdown("---")
     st.subheader("📊 Resultados por Região")
+
     df_reg = pd.DataFrame([
         {"Região": "SP", "Valor de venda": preco_novo, "Valor após os descontos": preco_liq,
          "Quantidade de unidades vendidas": un_sp, "Receita": receita_sp, "Impostos": imp_sp_val,
@@ -213,18 +294,20 @@ with tab_new:
          "Quantidade de unidades vendidas": un_es, "Receita": receita_es, "Impostos": imp_es_val,
          "Custos": custo_es_total, "Lucro": lucro_es, "Margem": margem_es},
     ])
+
     st.dataframe(
         df_reg.style.format({
             "Valor de venda": fmt_currency,
             "Valor após os descontos": fmt_currency,
             "Quantidade de unidades vendidas": lambda v: fmt_int(v),
-            "Receita": fmt_currency, "Impostos": fmt_currency, "Custos": fmt_currency,
-            "Lucro": fmt_currency, "Margem": lambda v: f"{v:.2f}%"
+            "Receita": fmt_currency, "Impostos": fmt_currency,
+            "Custos": fmt_currency, "Lucro": fmt_currency,
+            "Margem": lambda v: f"{v:.2f}%"
         }),
         width="stretch", hide_index=True
     )
 
-    # Totais
+    # ======= Totais =======
     st.markdown("---")
     st.subheader("🧮 Totais")
     t1, t2, t3, t4, t5, t6, t7 = st.columns(7)
@@ -233,5 +316,5 @@ with tab_new:
     with t3: big_metric("Impostos totais", fmt_currency(imp_total))
     with t4: big_metric("Receita Líquida", fmt_currency(receita_liquida))
     with t5: big_metric("( - ) CMV", fmt_currency(custo_total))
-    with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
+    with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto))
     with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
