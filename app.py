@@ -6,6 +6,21 @@ import unicodedata
 # ================= Config =================
 st.set_page_config(page_title="Calculadora de Margem", layout="wide", page_icon="📊")
 
+# ================= CSS (espaços + alinhamento dos inputs) =================
+st.markdown("""
+<style>
+/* inputs com menos espaço vertical entre label e campo */
+.stRadio > label, .stNumberInput > label, .stTextInput > label { margin-bottom: 0.25rem !important; }
+.block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
+
+/* radios mais juntinhos */
+div[role="radiogroup"] { gap: 0.25rem !important; }
+
+/* alinhar o valor do input com o texto do label (inclui Desconto) */
+div[data-baseweb="input"] > div:first-child { padding-left: 0.35rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # Planilha pública (Produto existente)
 SHEET_ID = "19-evG-LmVdYxHXNgaeAzAOk3DNzX5G8znqcIdQwgni0"
 SHEET_NAME = None  # None => primeira aba; use "HARDINPUT" p/ forçar
@@ -79,7 +94,7 @@ with tab_exist:
     if df is None or df.empty:
         st.warning("Planilha vazia ou inacessível.")
     else:
-        st.caption("Fonte: Google Sheets (VP-01 = São Paulo, VP-06 = Espírito Santo)")
+        st.caption("Fonte: Google Sheets")
 
         # Detecta colunas
         candidates_prod   = ["produto", "produto_nome", "nome", "sku", "codigo", "código", "item"]
@@ -115,8 +130,8 @@ with tab_exist:
                 if not row_es.empty:
                     custo_es_val = parse_money_ptbr(str(row_es[col_cost].iloc[0]))
 
-            # ===== Linha 1: Preço de venda | Quantidade | Tipo de desconto + Desconto
-            col_l1_c1, col_l1_c2, col_l1_c3 = st.columns([1, 1, 1.2])
+            # ===== Linha 1: Preço | Quantidade | Tipo de desconto + Desconto (colados)
+            col_l1_c1, col_l1_c2, col_l1_c3 = st.columns([1, 1, 1])
             with col_l1_c1:
                 preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0,
                                               format="%.2f", key="preco_existente_val")
@@ -124,13 +139,18 @@ with tab_exist:
                 qtd_vendas_exist = st.number_input("Quantidade de vendas (un.)", min_value=0, step=1, value=0,
                                                    key="qtd_exist")
             with col_l1_c3:
-                sub_desc_tipo, sub_desc_val = st.columns([0.55, 0.45])
-                with sub_desc_tipo:
-                    desc_tipo_exist = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True,
-                                               key="desc_tipo_exist")
-                with sub_desc_val:
-                    desc_valor_exist = st.number_input("Desconto", min_value=0.0, step=0.5,
-                                                       format="%.2f", key="desc_valor_exist")
+                st.markdown("**Tipo de desconto &nbsp;&nbsp;&nbsp;&nbsp; Desconto**", unsafe_allow_html=True)
+                c31, c32 = st.columns([0.2, 0.8], gap="small")
+                with c31:
+                    desc_tipo_exist = st.radio(
+                        "", options=["%", "R$"], horizontal=True,
+                        label_visibility="collapsed", key="desc_tipo_exist"
+                    )
+                with c32:
+                    desc_valor_exist = st.number_input(
+                        "", min_value=0.0, step=0.5, format="%.2f",
+                        label_visibility="collapsed", key="desc_valor_exist"
+                    )
 
             # ===== Linha 2: Custo SP | %SP | Imposto SP
             col_l2_c1, col_l2_c2, col_l2_c3 = st.columns([1, 1, 1])
@@ -161,13 +181,11 @@ with tab_exist:
             st.markdown("---")
 
             # ======= Cálculo
-            # preço líquido com desconto
             if desc_tipo_exist == "%":
                 preco_liq_exist = preco_exist * (1 - desc_valor_exist / 100.0)
             else:
                 preco_liq_exist = max(preco_exist - desc_valor_exist, 0.0)
 
-            # normaliza split (se somar 0, assume 50/50)
             soma_pct = pct_sp_exist + pct_es_exist
             if soma_pct == 0:
                 w_sp, w_es = 0.5, 0.5
@@ -179,11 +197,9 @@ with tab_exist:
             un_sp = int(round(qtd_vendas_exist * w_sp))
             un_es = int(qtd_vendas_exist - un_sp)
 
-            # custos unitários (0 se não encontrados)
             custo_sp_unit = custo_sp_val or 0.0
             custo_es_unit = custo_es_val or 0.0
 
-            # regionais
             receita_sp = preco_liq_exist * un_sp
             receita_es = preco_liq_exist * un_es
             imp_sp_val = receita_sp * (imposto_sp_pct_exist / 100.0)
@@ -195,7 +211,6 @@ with tab_exist:
             margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
             margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
-            # totais
             faturamento = preco_exist * (un_sp + un_es)
             descontos_totais = (preco_exist - preco_liq_exist) * (un_sp + un_es)
             imp_total = imp_sp_val + imp_es_val
@@ -244,18 +259,20 @@ with tab_new:
     st.markdown("#### Produto")
     nome_produto = st.text_input("Nome do produto", placeholder="Ex.: Sérum X 30ml")
 
-    # ===== Linha 1: Preço de venda | Quantidade | Tipo de desconto + Desconto
-    col2_l1_c1, col2_l1_c2, col2_l1_c3 = st.columns([1, 1, 1.2])
+    # ===== Linha 1: Preço | Quantidade | Tipo de desconto + Desconto (colados)
+    col2_l1_c1, col2_l1_c2, col2_l1_c3 = st.columns([1, 1, 1])
     with col2_l1_c1:
         preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
     with col2_l1_c2:
         qtd_vendas = st.number_input("Quantidade de vendas (un.)", min_value=0, step=1, value=0)
     with col2_l1_c3:
-        sub2_desc_tipo, sub2_desc_val = st.columns([0.55, 0.45])
-        with sub2_desc_tipo:
-            desc_tipo = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
-        with sub2_desc_val:
-            desc_valor = st.number_input("Desconto", min_value=0.0, step=0.5, format="%.2f")
+        st.markdown("**Tipo de desconto &nbsp;&nbsp;&nbsp;&nbsp; Desconto**", unsafe_allow_html=True)
+        c31, c32 = st.columns([0.2, 0.8], gap="small")
+        with c31:
+            desc_tipo = st.radio("", options=["%", "R$"], horizontal=True, label_visibility="collapsed")
+        with c32:
+            desc_valor = st.number_input("", min_value=0.0, step=0.5, format="%.2f",
+                                         label_visibility="collapsed")
 
     # ===== Linha 2: Custo SP | %SP | Imposto SP
     col2_l2_c1, col2_l2_c2, col2_l2_c3 = st.columns([1, 1, 1])
