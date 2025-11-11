@@ -6,22 +6,7 @@ import unicodedata
 # ================= Config =================
 st.set_page_config(page_title="Calculadora de Margem", layout="wide", page_icon="📊")
 
-# ================= CSS (espaços + alinhamento dos inputs) =================
-st.markdown("""
-<style>
-/* inputs com menos espaço vertical entre label e campo */
-.stRadio > label, .stNumberInput > label, .stTextInput > label { margin-bottom: 0.25rem !important; }
-.block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
-
-/* radios mais juntinhos */
-div[role="radiogroup"] { gap: 0.25rem !important; }
-
-/* alinhar o valor do input com o texto do label (inclui Desconto) */
-div[data-baseweb="input"] > div:first-child { padding-left: 0.35rem !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# Planilha pública (Produto existente)
+# Planilha pública
 SHEET_ID = "19-evG-LmVdYxHXNgaeAzAOk3DNzX5G8znqcIdQwgni0"
 SHEET_NAME = None  # None => primeira aba; use "HARDINPUT" p/ forçar
 
@@ -97,9 +82,9 @@ with tab_exist:
         st.caption("Fonte: Google Sheets")
 
         # Detecta colunas
-        candidates_prod   = ["produto", "produto_nome", "nome", "sku", "codigo", "código", "item"]
-        candidates_cost   = ["custo", "custo medio", "custo médio", "custo unitario",
-                             "custo unitário", "average_cost", "preco_custo", "preço de custo"]
+        candidates_prod  = ["produto", "produto_nome", "nome", "sku", "codigo", "código", "item"]
+        candidates_cost  = ["custo", "custo medio", "custo médio", "custo unitario",
+                            "custo unitário", "average_cost", "preco_custo", "preço de custo"]
         candidates_branch = ["branch", "filial"]
 
         col_prod   = next((c for c in candidates_prod if c in df.columns), None)
@@ -109,17 +94,17 @@ with tab_exist:
         if not col_prod or not col_cost:
             st.warning(f"Não encontrei colunas de produto/custo. Colunas: {list(df.columns)}")
         else:
+            # Select de produto (com busca ao digitar)
             produtos = (
                 df[col_prod].astype(str).str.strip()
                 .replace({"": None}).dropna().drop_duplicates().tolist()
             )
-
-            # ===== BLOCO: Produto =====
-            st.markdown("#### Produto")
             produto_sel = st.selectbox("Produto (digite para buscar)", options=produtos, key="produto_existente")
 
-            # Busca custos por branch
+            # Subconjunto do produto
             df_prod = df[df[col_prod] == produto_sel].copy()
+
+            # Captura custos por branch: SP (VP-01) e ES (VP-06)
             custo_sp_val = None
             custo_es_val = None
             if col_branch and not df_prod.empty:
@@ -130,105 +115,103 @@ with tab_exist:
                 if not row_es.empty:
                     custo_es_val = parse_money_ptbr(str(row_es[col_cost].iloc[0]))
 
-            # ===== Linha 1: Preço | Quantidade | Tipo de desconto + Desconto (colados)
-            col_l1_c1, col_l1_c2, col_l1_c3 = st.columns([1, 1, 1])
-            with col_l1_c1:
-                preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0,
-                                              format="%.2f", key="preco_existente_val")
-            with col_l1_c2:
-                qtd_vendas_exist = st.number_input("Quantidade de vendas (un.)", min_value=0, step=1, value=0,
-                                                   key="qtd_exist")
-            with col_l1_c3:
-                st.markdown("**Tipo de desconto &nbsp;&nbsp;&nbsp;&nbsp; Desconto**", unsafe_allow_html=True)
-                c31, c32 = st.columns([0.2, 0.8], gap="small")
-                with c31:
-                    desc_tipo_exist = st.radio(
-                        "", options=["%", "R$"], horizontal=True,
-                        label_visibility="collapsed", key="desc_tipo_exist"
-                    )
-                with c32:
-                    desc_valor_exist = st.number_input(
-                        "", min_value=0.0, step=0.5, format="%.2f",
-                        label_visibility="collapsed", key="desc_valor_exist"
-                    )
-
-            # ===== Linha 2: Custo SP | %SP | Imposto SP
-            col_l2_c1, col_l2_c2, col_l2_c3 = st.columns([1, 1, 1])
-            with col_l2_c1:
+            # Campos imutáveis com os custos encontrados
+            csp, ces = st.columns(2)
+            with csp:
                 st.text_input("Custo São Paulo (VP-01)",
                               value=("—" if custo_sp_val is None else f"{custo_sp_val:.2f}"),
-                              disabled=True, key="custo_sp_ro")
-            with col_l2_c2:
-                pct_sp_exist = st.number_input("% SP", min_value=0.0, max_value=100.0,
-                                               value=50.0, step=1.0, format="%.2f", key="pct_sp_exist")
-            with col_l2_c3:
-                imposto_sp_pct_exist = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0,
-                                                       value=0.0, step=0.5, format="%.2f", key="imp_sp_exist")
-
-            # ===== Linha 3: Custo ES | %ES | Imposto ES
-            col_l3_c1, col_l3_c2, col_l3_c3 = st.columns([1, 1, 1])
-            with col_l3_c1:
+                              disabled=True)
+            with ces:
                 st.text_input("Custo Espírito Santo (VP-06)",
                               value=("—" if custo_es_val is None else f"{custo_es_val:.2f}"),
-                              disabled=True, key="custo_es_ro")
-            with col_l3_c2:
-                pct_es_exist = st.number_input("% ES", min_value=0.0, max_value=100.0,
-                                               value=50.0, step=1.0, format="%.2f", key="pct_es_exist")
-            with col_l3_c3:
+                              disabled=True)
+
+            # ===== Entradas (agora COM desconto, igual à aba 2) =====
+            preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0,
+                                          format="%.2f", key="preco_existente_val")
+
+            # Desconto (novidade na aba 1)
+            col_desc_exist = st.columns(2)
+            with col_desc_exist[0]:
+                desc_tipo_exist = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True, key="desc_tipo_exist")
+            with col_desc_exist[1]:
+                desc_valor_exist = st.number_input(f"Desconto ({desc_tipo_exist})", min_value=0.0, step=0.5,
+                                                   format="%.2f", key="desc_valor_exist")
+
+            # Distribuição e impostos
+            qtd_vendas_exist = st.number_input("Quantidade de Vendas (un.)", min_value=0, step=1, value=0,
+                                               key="qtd_exist")
+            pct_sp_exist = st.number_input("% SP", min_value=0.0, max_value=100.0, step=1.0, value=50.0,
+                                           format="%.2f", key="pct_sp_exist")
+            pct_es_exist = st.number_input("% ES", min_value=0.0, max_value=100.0, step=1.0, value=50.0,
+                                           format="%.2f", key="pct_es_exist")
+
+            col_imp_exist = st.columns(2)
+            with col_imp_exist[0]:
+                imposto_sp_pct_exist = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0,
+                                                       step=0.5, value=0.0, format="%.2f", key="imp_sp_exist")
+            with col_imp_exist[1]:
                 imposto_es_pct_exist = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0,
-                                                       value=0.0, step=0.5, format="%.2f", key="imp_es_exist")
+                                                       step=0.5, value=0.0, format="%.2f", key="imp_es_exist")
 
-            st.markdown("---")
-
-            # ======= Cálculo
-            if desc_tipo_exist == "%":
-                preco_liq_exist = preco_exist * (1 - desc_valor_exist / 100.0)
-            else:
-                preco_liq_exist = max(preco_exist - desc_valor_exist, 0.0)
-
-            soma_pct = pct_sp_exist + pct_es_exist
-            if soma_pct == 0:
+            # Split normalizado
+            total_pct_exist = pct_sp_exist + pct_es_exist
+            if total_pct_exist == 0:
                 w_sp, w_es = 0.5, 0.5
                 st.warning("Percentuais somam 0%. Usando 50%/50%.")
             else:
-                w_sp = pct_sp_exist / soma_pct
-                w_es = pct_es_exist / soma_pct
+                w_sp = pct_sp_exist / total_pct_exist
+                w_es = pct_es_exist / total_pct_exist
 
             un_sp = int(round(qtd_vendas_exist * w_sp))
             un_es = int(qtd_vendas_exist - un_sp)
 
-            custo_sp_unit = custo_sp_val or 0.0
-            custo_es_unit = custo_es_val or 0.0
+            # Preço líquido COM desconto (igual à aba 2)
+            if desc_tipo_exist == "%":
+                preco_liq = preco_exist * (1 - desc_valor_exist / 100.0)
+            else:
+                preco_liq = max(preco_exist - desc_valor_exist, 0.0)
 
-            receita_sp = preco_liq_exist * un_sp
-            receita_es = preco_liq_exist * un_es
+            # Cálculos regionais
+            receita_sp = preco_liq * un_sp
+            receita_es = preco_liq * un_es
+
             imp_sp_val = receita_sp * (imposto_sp_pct_exist / 100.0)
             imp_es_val = receita_es * (imposto_es_pct_exist / 100.0)
+
+            # Custos por região (se ausente, considera 0)
+            custo_sp_unit = custo_sp_val or 0.0
+            custo_es_unit = custo_es_val or 0.0
             custo_sp_total = custo_sp_unit * un_sp
             custo_es_total = custo_es_unit * un_es
+
             lucro_sp = receita_sp - imp_sp_val - custo_sp_total
             lucro_es = receita_es - imp_es_val - custo_es_total
             margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
             margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
+            # Totais (agora considerando desconto, igual à aba 2)
             faturamento = preco_exist * (un_sp + un_es)
-            descontos_totais = (preco_exist - preco_liq_exist) * (un_sp + un_es)
+            descontos_totais = (preco_exist - preco_liq) * (un_sp + un_es)
             imp_total = imp_sp_val + imp_es_val
             receita_liquida = faturamento - descontos_totais - imp_total
             custo_total = custo_sp_total + custo_es_total
             lucro_bruto_total = receita_liquida - custo_total
             margem_total = (lucro_bruto_total / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
 
-            # ======= Resultados por Região (TABELA)
+            # ======= Tabela por região =======
+            st.markdown("---")
             st.subheader("📊 Resultados por Região")
+
             df_reg_exist = pd.DataFrame([
-                {"Região": "SP", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq_exist,
+                {"Região": "SP", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq,
                  "Quantidade de unidades vendidas": un_sp, "Receita": receita_sp, "Impostos": imp_sp_val,
                  "Custos": custo_sp_total, "Lucro": lucro_sp, "Margem": margem_sp},
-                {"Região": "ES", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq_exist,
+                {"Região": "ES", "Valor de venda": preco_exist, "Valor após os descontos": preco_liq,
                  "Quantidade de unidades vendidas": un_es, "Receita": receita_es, "Impostos": imp_es_val,
                  "Custos": custo_es_total, "Lucro": lucro_es, "Margem": margem_es},
             ])
+
             st.dataframe(
                 df_reg_exist.style.format({
                     "Valor de venda": fmt_currency,
@@ -241,7 +224,7 @@ with tab_exist:
                 width="stretch", hide_index=True
             )
 
-            # ======= Totais
+            # ======= Totais =======
             st.markdown("---")
             st.subheader("🧮 Totais")
             t1, t2, t3, t4, t5, t6, t7 = st.columns(7)
@@ -253,97 +236,80 @@ with tab_exist:
             with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
             with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
 
-# --------- ABA 2: PRODUTO NOVO ---------
+# --------- ABA 2: PRODUTO NOVO (como estava) ---------
 with tab_new:
-    # ===== BLOCO: Produto =====
-    st.markdown("#### Produto")
-    nome_produto = st.text_input("Nome do produto", placeholder="Ex.: Sérum X 30ml")
+    st.caption("Simulador para novos produtos.")
 
-    # ===== Linha 1: Preço | Quantidade | Tipo de desconto + Desconto (colados)
-    col2_l1_c1, col2_l1_c2, col2_l1_c3 = st.columns([1, 1, 1])
-    with col2_l1_c1:
-        preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
-    with col2_l1_c2:
-        qtd_vendas = st.number_input("Quantidade de vendas (un.)", min_value=0, step=1, value=0)
-    with col2_l1_c3:
-        st.markdown("**Tipo de desconto &nbsp;&nbsp;&nbsp;&nbsp; Desconto**", unsafe_allow_html=True)
-        c31, c32 = st.columns([0.2, 0.8], gap="small")
-        with c31:
-            desc_tipo = st.radio("", options=["%", "R$"], horizontal=True, label_visibility="collapsed")
-        with c32:
-            desc_valor = st.number_input("", min_value=0.0, step=0.5, format="%.2f",
-                                         label_visibility="collapsed")
+    preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
 
-    # ===== Linha 2: Custo SP | %SP | Imposto SP
-    col2_l2_c1, col2_l2_c2, col2_l2_c3 = st.columns([1, 1, 1])
-    with col2_l2_c1:
-        custo_sp = st.number_input("Custo São Paulo (R$)", min_value=0.0, step=1.0, format="%.2f")
-    with col2_l2_c2:
-        pct_sp = st.number_input("% SP", min_value=0.0, max_value=100.0, value=50.0, step=1.0, format="%.2f")
-    with col2_l2_c3:
-        imposto_sp_pct = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0,
-                                         value=0.0, step=0.5, format="%.2f")
+    col_custos = st.columns(2)
+    with col_custos[0]:
+        custo_sp = st.number_input("Custo SP (R$)", min_value=0.0, step=1.0, format="%.2f")
+    with col_custos[1]:
+        custo_es = st.number_input("Custo ES (R$)", min_value=0.0, step=1.0, format="%.2f")
 
-    # ===== Linha 3: Custo ES | %ES | Imposto ES
-    col2_l3_c1, col2_l3_c2, col2_l3_c3 = st.columns([1, 1, 1])
-    with col2_l3_c1:
-        custo_es = st.number_input("Custo Espírito Santo (R$)", min_value=0.0, step=1.0, format="%.2f")
-    with col2_l3_c2:
-        pct_es = st.number_input("% ES", min_value=0.0, max_value=100.0, value=50.0, step=1.0, format="%.2f")
-    with col2_l3_c3:
-        imposto_es_pct = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0,
-                                         value=0.0, step=0.5, format="%.2f")
+    col_desc = st.columns(2)
+    with col_desc[0]:
+        desc_tipo = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True)
+    with col_desc[1]:
+        desc_valor = st.number_input(f"Desconto ({desc_tipo})", min_value=0.0, step=0.5, format="%.2f")
 
-    st.markdown("---")
+    qtd_vendas = st.number_input("Quantidade de Vendas (un.)", min_value=0, step=1, value=0)
+    pct_sp = st.number_input("% SP", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f")
+    pct_es = st.number_input("% ES", min_value=0.0, max_value=100.0, step=1.0, value=50.0, format="%.2f")
 
-    # ======= Cálculo
+    col_imp = st.columns(2)
+    with col_imp[0]:
+        imposto_sp_pct = st.number_input("Imposto SP (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f")
+    with col_imp[1]:
+        imposto_es_pct = st.number_input("Imposto ES (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f")
+
+    total_pct = pct_sp + pct_es
+    w_sp = pct_sp / total_pct if total_pct else 0.5
+    w_es = pct_es / total_pct if total_pct else 0.5
+    un_sp = int(qtd_vendas * w_sp)
+    un_es = int(qtd_vendas - un_sp)
+
     if desc_tipo == "%":
         preco_liq = preco_novo * (1 - desc_valor / 100.0)
     else:
         preco_liq = max(preco_novo - desc_valor, 0.0)
 
-    soma_pct2 = pct_sp + pct_es
-    if soma_pct2 == 0:
-        w_sp2, w_es2 = 0.5, 0.5
-        st.warning("Percentuais somam 0%. Usando 50%/50%.")
-    else:
-        w_sp2 = pct_sp / soma_pct2
-        w_es2 = pct_es / soma_pct2
+    receita_sp = preco_liq * un_sp
+    receita_es = preco_liq * un_es
+    imp_sp_val = receita_sp * (imposto_sp_pct / 100.0)
+    imp_es_val = receita_es * (imposto_es_pct / 100.0)
+    custo_sp_total = custo_sp * un_sp
+    custo_es_total = custo_es * un_es
+    lucro_sp = receita_sp - imp_sp_val - custo_sp_total
+    lucro_es = receita_es - imp_es_val - custo_es_total
+    margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
+    margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
-    un_sp2 = int(round(qtd_vendas * w_sp2))
-    un_es2 = int(qtd_vendas - un_sp2)
+    faturamento = preco_novo * (un_sp + un_es)
+    descontos_totais = (preco_novo - preco_liq) * (un_sp + un_es)
+    receita_total = receita_sp + receita_es
+    imp_total = imp_sp_val + imp_es_val
+    receita_liquida = faturamento - descontos_totais - imp_total
+    custo_total = custo_sp_total + custo_es_total
+    lucro_bruto = receita_liquida - custo_total
+    margem_total = (lucro_bruto / receita_liquida * 100.0) if receita_liquida > 0 else 0.0
 
-    receita_sp2 = preco_liq * un_sp2
-    receita_es2 = preco_liq * un_es2
-    imp_sp_val2 = receita_sp2 * (imposto_sp_pct / 100.0)
-    imp_es_val2 = receita_es2 * (imposto_es_pct / 100.0)
-    custo_sp_total2 = custo_sp * un_sp2
-    custo_es_total2 = custo_es * un_es2
-    lucro_sp2 = receita_sp2 - imp_sp_val2 - custo_sp_total2
-    lucro_es2 = receita_es2 - imp_es_val2 - custo_es_total2
-    margem_sp2 = (lucro_sp2 / receita_sp2 * 100.0) if receita_sp2 > 0 else 0.0
-    margem_es2 = (lucro_es2 / receita_es2 * 100.0) if receita_es2 > 0 else 0.0
-
-    faturamento2 = preco_novo * (un_sp2 + un_es2)
-    descontos_totais2 = (preco_novo - preco_liq) * (un_sp2 + un_es2)
-    imp_total2 = imp_sp_val2 + imp_es_val2
-    receita_liquida2 = faturamento2 - descontos_totais2 - imp_total2
-    custo_total2 = custo_sp_total2 + custo_es_total2
-    lucro_bruto2 = receita_liquida2 - custo_total2
-    margem_total2 = (lucro_bruto2 / receita_liquida2 * 100.0) if receita_liquida2 > 0 else 0.0
-
-    # ======= Resultados por Região (TABELA)
+    # ======= Resultados por Região (TABELA) =======
+    st.markdown("---")
     st.subheader("📊 Resultados por Região")
-    df_reg2 = pd.DataFrame([
+
+    df_reg = pd.DataFrame([
         {"Região": "SP", "Valor de venda": preco_novo, "Valor após os descontos": preco_liq,
-         "Quantidade de unidades vendidas": un_sp2, "Receita": receita_sp2, "Impostos": imp_sp_val2,
-         "Custos": custo_sp_total2, "Lucro": lucro_sp2, "Margem": margem_sp2},
+         "Quantidade de unidades vendidas": un_sp, "Receita": receita_sp, "Impostos": imp_sp_val,
+         "Custos": custo_sp_total, "Lucro": lucro_sp, "Margem": margem_sp},
         {"Região": "ES", "Valor de venda": preco_novo, "Valor após os descontos": preco_liq,
-         "Quantidade de unidades vendidas": un_es2, "Receita": receita_es2, "Impostos": imp_es_val2,
-         "Custos": custo_es_total2, "Lucro": lucro_es2, "Margem": margem_es2},
+         "Quantidade de unidades vendidas": un_es, "Receita": receita_es, "Impostos": imp_es_val,
+         "Custos": custo_es_total, "Lucro": lucro_es, "Margem": margem_es},
     ])
+
     st.dataframe(
-        df_reg2.style.format({
+        df_reg.style.format({
             "Valor de venda": fmt_currency,
             "Valor após os descontos": fmt_currency,
             "Quantidade de unidades vendidas": lambda v: fmt_int(v),
@@ -354,14 +320,14 @@ with tab_new:
         width="stretch", hide_index=True
     )
 
-    # ======= Totais
+    # ======= Totais =======
     st.markdown("---")
     st.subheader("🧮 Totais")
     t1, t2, t3, t4, t5, t6, t7 = st.columns(7)
-    with t1: big_metric("Unidades", fmt_int(un_sp2 + un_es2))
-    with t2: big_metric("Faturamento", fmt_currency(faturamento2))
-    with t3: big_metric("Impostos totais", fmt_currency(imp_total2))
-    with t4: big_metric("Receita Líquida", fmt_currency(receita_liquida2))
-    with t5: big_metric("( - ) CMV", fmt_currency(custo_total2))
-    with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto2))
-    with t7: big_metric("Margem Bruta", f"{margem_total2:.2f}%")
+    with t1: big_metric("Unidades", fmt_int(un_sp + un_es))
+    with t2: big_metric("Faturamento", fmt_currency(faturamento))
+    with t3: big_metric("Impostos totais", fmt_currency(imp_total))
+    with t4: big_metric("Receita Líquida", fmt_currency(receita_liquida))
+    with t5: big_metric("( - ) CMV", fmt_currency(custo_total))
+    with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto))
+    with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
