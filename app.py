@@ -52,6 +52,18 @@ def parse_money_ptbr(x: str) -> float:
     except:
         return 0.0
 
+def parse_number_loose(x: str) -> float:
+    """
+    Interpreta valores em en-US (1234.56) ou pt-BR (1.234,56) e com/sem 'R$'.
+    """
+    if x is None:
+        return 0.0
+    s = str(x).strip().replace("R$", "").replace("\u00a0", "").replace(" ", "")
+    try:
+        return float(s)
+    except:
+        return parse_money_ptbr(s)
+
 def big_metric(label: str, value_str: str):
     st.markdown(
         f"""
@@ -84,12 +96,14 @@ with tab_exist:
         # Detecta colunas
         candidates_prod  = ["produto", "produto_nome", "nome", "sku", "codigo", "código", "item"]
         candidates_cost  = ["custo", "custo medio", "custo médio", "custo unitario",
-                            "custo unitário", "average_cost", "preco_custo", "preço de custo"]
+                            "custo unitário", "average_cost", "average cost",
+                            "preco_custo", "preço de custo"]
         candidates_branch = ["branch", "filial"]
 
-        col_prod   = next((c for c in candidates_prod if c in df.columns), None)
-        col_cost   = next((c for c in candidates_cost if c in df.columns), None)
-        col_branch = next((c for c in candidates_branch if c in df.columns), None)
+        col_prod    = next((c for c in candidates_prod if c in df.columns), None)
+        col_cost    = next((c for c in candidates_cost if c in df.columns), None)
+        col_branch  = next((c for c in candidates_branch if c in df.columns), None)
+        col_avg_price = "average_price" if "average_price" in df.columns else None
 
         if not col_prod or not col_cost:
             st.warning(f"Não encontrei colunas de produto/custo. Colunas: {list(df.columns)}")
@@ -102,18 +116,57 @@ with tab_exist:
             produto_sel = st.selectbox("Produto (digite para buscar)", options=produtos, key="produto_existente")
 
             # Subconjunto do produto
-            df_prod = df[df[col_prod] == produto_sel].copy()
+            df_prod = df[df[col_prod].astype(str).str.strip() == str(produto_sel).strip()].copy()
 
             # Captura custos por branch: SP (VP-01) e ES (VP-06)
             custo_sp_val = None
             custo_es_val = None
+            row_sp = None
+            row_es = None
             if col_branch and not df_prod.empty:
-                row_sp = df_prod[df_prod[col_branch].astype(str) == "VP-01"]
+                branch_series = df_prod[col_branch].astype(str).str.strip().str.upper()
+                row_sp = df_prod[branch_series == "VP-01"]
+                row_es = df_prod[branch_series == "VP-06"]
+
                 if not row_sp.empty:
                     custo_sp_val = parse_money_ptbr(str(row_sp[col_cost].iloc[0]))
-                row_es = df_prod[df_prod[col_branch].astype(str) == "VP-06"]
                 if not row_es.empty:
                     custo_es_val = parse_money_ptbr(str(row_es[col_cost].iloc[0]))
+
+            # ===== Preço de venda: somente da planilha (average_price da VP-01) =====
+            preco_exist_default = 0.0
+            if col_avg_price and not df_prod.empty:
+                # tenta primeiro pegar o average_price da VP-01 (igual ao custo)
+                serie_preco_sp = pd.Series(dtype=str)
+                if row_sp is not None and not row_sp.empty:
+                    serie_preco_sp = (
+                        row_sp[col_avg_price].astype(str)
+                        .str.strip()
+                        .replace({"": None, "nan": None})
+                        .dropna()
+                    )
+                if not serie_preco_sp.empty:
+                    preco_exist_default = parse_number_loose(serie_preco_sp.iloc[0]) or 0.0
+                else:
+                    # fallback: qualquer average_price do produto
+                    serie_preco = (
+                        df_prod[col_avg_price].astype(str)
+                        .str.strip()
+                        .replace({"": None, "nan": None})
+                        .dropna()
+                    )
+                    if not serie_preco.empty:
+                        preco_exist_default = parse_number_loose(serie_preco.iloc[0]) or 0.0
+
+            # Exibe o preço de venda como TEXTO somente leitura (sempre atualiza)
+            st.text_input(
+                "Preço de venda (R$)",
+                value=f"{preco_exist_default:.2f}",
+                disabled=True
+            )
+            # Valor efetivo usado nos cálculos
+            preco_exist = float(preco_exist_default)
+            # ===============================================================
 
             # Campos imutáveis com os custos encontrados
             csp, ces = st.columns(2)
@@ -126,11 +179,7 @@ with tab_exist:
                               value=("—" if custo_es_val is None else f"{custo_es_val:.2f}"),
                               disabled=True)
 
-            # ===== Entradas (agora COM desconto, igual à aba 2) =====
-            preco_exist = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0,
-                                          format="%.2f", key="preco_existente_val")
-
-            # Desconto (novidade na aba 1)
+            # ===== Entradas (COM desconto, igual à aba 2) =====
             col_desc_exist = st.columns(2)
             with col_desc_exist[0]:
                 desc_tipo_exist = st.radio("Tipo de desconto", options=["%", "R$"], horizontal=True, key="desc_tipo_exist")
@@ -166,7 +215,7 @@ with tab_exist:
             un_sp = int(round(qtd_vendas_exist * w_sp))
             un_es = int(qtd_vendas_exist - un_sp)
 
-            # Preço líquido COM desconto (igual à aba 2)
+            # Preço líquido COM desconto
             if desc_tipo_exist == "%":
                 preco_liq = preco_exist * (1 - desc_valor_exist / 100.0)
             else:
@@ -190,7 +239,7 @@ with tab_exist:
             margem_sp = (lucro_sp / receita_sp * 100.0) if receita_sp > 0 else 0.0
             margem_es = (lucro_es / receita_es * 100.0) if receita_es > 0 else 0.0
 
-            # Totais (agora considerando desconto, igual à aba 2)
+            # Totais
             faturamento = preco_exist * (un_sp + un_es)
             descontos_totais = (preco_exist - preco_liq) * (un_sp + un_es)
             imp_total = imp_sp_val + imp_es_val
@@ -236,9 +285,11 @@ with tab_exist:
             with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
             with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
 
-# --------- ABA 2: PRODUTO NOVO (como estava) ---------
+# --------- ABA 2: PRODUTO NOVO (inclui nome do produto) ---------
 with tab_new:
     st.caption("Simulador para novos produtos.")
+
+    nome_produto_novo = st.text_input("Nome do produto")
 
     preco_novo = st.number_input("Preço de venda (R$)", min_value=0.0, step=1.0, format="%.2f")
 
