@@ -99,11 +99,20 @@ with tab_exist:
                             "custo unitário", "average_cost", "average cost",
                             "preco_custo", "preço de custo"]
         candidates_branch = ["branch", "filial"]
+        candidates_prod_name = [  # <---- NOVO BLOCO
+            "product_name",
+            "product name",
+            "nome_produto",
+            "nome produto",
+            "descricao",
+            "descrição",
+        ]
 
-        col_prod    = next((c for c in candidates_prod if c in df.columns), None)
-        col_cost    = next((c for c in candidates_cost if c in df.columns), None)
-        col_branch  = next((c for c in candidates_branch if c in df.columns), None)
-        col_avg_price = "average_price" if "average_price" in df.columns else None
+        col_prod       = next((c for c in candidates_prod if c in df.columns), None)
+        col_cost       = next((c for c in candidates_cost if c in df.columns), None)
+        col_branch     = next((c for c in candidates_branch if c in df.columns), None)
+        col_avg_price  = "average_price" if "average_price" in df.columns else None
+        col_prod_name  = next((c for c in candidates_prod_name if c in df.columns), None)  # <---- ALTERADO
 
         if not col_prod or not col_cost:
             st.warning(f"Não encontrei colunas de produto/custo. Colunas: {list(df.columns)}")
@@ -117,6 +126,25 @@ with tab_exist:
 
             # Subconjunto do produto
             df_prod = df[df[col_prod].astype(str).str.strip() == str(produto_sel).strip()].copy()
+
+            # ===== Nome do produto vindo da planilha (product_name ou similares) =====
+            nome_produto_planilha = ""
+            if col_prod_name and not df_prod.empty:
+                serie_nome = (
+                    df_prod[col_prod_name].astype(str)
+                    .str.strip()
+                    .replace({"": None, "nan": None})
+                    .dropna()
+                )
+                if not serie_nome.empty:
+                    nome_produto_planilha = serie_nome.iloc[0]
+
+            st.text_input(
+                "Nome do produto (planilha)",
+                value=nome_produto_planilha,
+                disabled=True
+            )
+            # ============================================================
 
             # Captura custos por branch: SP (VP-01) e ES (VP-06)
             custo_sp_val = None
@@ -285,6 +313,28 @@ with tab_exist:
             with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto_total))
             with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
 
+            # ======= Download em planilha (CSV) - PRODUTO EXISTENTE =======
+            st.markdown("---")
+            df_export_exist = df_reg_exist.copy()
+            df_export_exist.loc[len(df_export_exist)] = {
+                "Região": "TOTAL",
+                "Valor de venda": preco_exist,
+                "Valor após os descontos": preco_liq,
+                "Quantidade de unidades vendidas": un_sp + un_es,
+                "Receita": receita_sp + receita_es,
+                "Impostos": imp_total,
+                "Custos": custo_total,
+                "Lucro": lucro_bruto_total,
+                "Margem": margem_total,
+            }
+            csv_exist = df_export_exist.to_csv(index=False, sep=";", encoding="utf-8-sig")
+            st.download_button(
+                "📥 Baixar resultados (produto existente)",
+                data=csv_exist,
+                file_name="resultado_produto_existente.csv",
+                mime="text/csv",
+            )
+
 # --------- ABA 2: PRODUTO NOVO (inclui nome do produto) ---------
 with tab_new:
     st.caption("Simulador para novos produtos.")
@@ -382,3 +432,25 @@ with tab_new:
     with t5: big_metric("( - ) CMV", fmt_currency(custo_total))
     with t6: big_metric("Lucro Bruto", fmt_currency(lucro_bruto))
     with t7: big_metric("Margem Bruta", f"{margem_total:.2f}%")
+
+    # ======= Download em planilha (CSV) - PRODUTO NOVO =======
+    st.markdown("---")
+    df_export_new = df_reg.copy()
+    df_export_new.loc[len(df_export_new)] = {
+        "Região": "TOTAL",
+        "Valor de venda": preco_novo,
+        "Valor após os descontos": preco_liq,
+        "Quantidade de unidades vendidas": un_sp + un_es,
+        "Receita": receita_sp + receita_es,
+        "Impostos": imp_total,
+        "Custos": custo_total,
+        "Lucro": lucro_bruto,
+        "Margem": margem_total,
+    }
+    csv_new = df_export_new.to_csv(index=False, sep=";", encoding="utf-8-sig")
+    st.download_button(
+        "📥 Baixar resultados (produto novo)",
+        data=csv_new,
+        file_name="resultado_produto_novo.csv",
+        mime="text/csv",
+    )
