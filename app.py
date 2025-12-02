@@ -329,7 +329,7 @@ with tab_exist:
             }
             csv_exist = df_export_exist.to_csv(index=False, sep=";", encoding="utf-8-sig")
             st.download_button(
-                "📥 Baixar resultados (produto existente)",
+                "📥 Baixar resultados",
                 data=csv_exist,
                 file_name="resultado_produto_existente.csv",
                 mime="text/csv",
@@ -449,7 +449,7 @@ with tab_new:
     }
     csv_new = df_export_new.to_csv(index=False, sep=";", encoding="utf-8-sig")
     st.download_button(
-        "📥 Baixar resultados (produto novo)",
+        "📥 Baixar resultados",
         data=csv_new,
         file_name="resultado_produto_novo.csv",
         mime="text/csv",
